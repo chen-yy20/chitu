@@ -9,6 +9,7 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from chitu.models.registry import ModelType, register_model, log_init_params
 from chitu.attn_backend import AttnBackend
+from chitu.diffusion.model_default import WanModelDefaults
 
 # TODO: chitu attention backend support
 def flash_attention():
@@ -387,56 +388,14 @@ class WanModel(ModelMixin, ConfigMixin):
     ]
     _no_split_modules = ['WanAttentionBlock']
 
-    def __init__(self,
-                 model_type='t2v',
-                 patch_size=(1, 2, 2),
-                 text_len=512,
-                 in_dim=16,
-                 dim=1536, # 14B 2048
-                 ffn_dim=8960, # 14B 8192
-                 freq_dim=256,
-                 text_dim=4096,
-                 out_dim=16,
-                 num_heads=16,
-                 num_layers=32,
-                 window_size=(-1, -1),
-                 qk_norm=True,
-                 cross_attn_norm=True,
-                 eps=1e-6):
+    def __init__(self, model_type='t2v', **kwargs):
         r"""
         Initialize the diffusion model backbone.
 
         Args:
             model_type (`str`, *optional*, defaults to 't2v'):
                 Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video) or 'flf2v' (first-last-frame-to-video) or 'vace'
-            patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
-                3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
-            text_len (`int`, *optional*, defaults to 512):
-                Fixed length for text embeddings
-            in_dim (`int`, *optional*, defaults to 16):
-                Input video channels (C_in)
-            dim (`int`, *optional*, defaults to 2048):
-                Hidden dimension of the transformer
-            ffn_dim (`int`, *optional*, defaults to 8192):
-                Intermediate dimension in feed-forward network
-            freq_dim (`int`, *optional*, defaults to 256):
-                Dimension for sinusoidal time embeddings
-            text_dim (`int`, *optional*, defaults to 4096):
-                Input dimension for text embeddings
-            out_dim (`int`, *optional*, defaults to 16):
-                Output video channels (C_out)
-            num_heads (`int`, *optional*, defaults to 16):
-                Number of attention heads
-            num_layers (`int`, *optional*, defaults to 32):
-                Number of transformer blocks
-            window_size (`tuple`, *optional*, defaults to (-1, -1)):
-                Window size for local attention (-1 indicates global attention)
-            qk_norm (`bool`, *optional*, defaults to True):
-                Enable query/key normalization
-            cross_attn_norm (`bool`, *optional*, defaults to False):
-                Enable cross-attention normalization
-            eps (`float`, *optional*, defaults to 1e-6):
-                Epsilon value for normalization layers
+            **kwargs: 其他超参数，如果未提供则使用默认值
         """
 
         super().__init__()
@@ -446,46 +405,49 @@ class WanModel(ModelMixin, ConfigMixin):
         assert model_type in ['t2v', 'i2v', 'flf2v', 'vace']
         self.model_type = model_type
 
-        self.patch_size = patch_size
-        self.text_len = text_len
-        self.in_dim = in_dim
-        self.dim = dim
-        self.ffn_dim = ffn_dim
-        self.freq_dim = freq_dim
-        self.text_dim = text_dim
-        self.out_dim = out_dim
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.window_size = window_size
-        self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
-        self.eps = eps
+        # 使用默认值填充缺失的参数
+        defaults = WanModelDefaults()
+        
+        self.patch_size = kwargs.get('patch_size', defaults.patch_size)
+        self.text_len = kwargs.get('text_len', defaults.text_len)
+        self.in_dim = kwargs.get('in_dim', defaults.in_dim)
+        self.dim = kwargs.get('dim', defaults.dim)
+        self.ffn_dim = kwargs.get('ffn_dim', defaults.ffn_dim)
+        self.freq_dim = kwargs.get('freq_dim', defaults.freq_dim)
+        self.text_dim = kwargs.get('text_dim', defaults.text_dim)
+        self.out_dim = kwargs.get('out_dim', defaults.out_dim)
+        self.num_heads = kwargs.get('num_heads', defaults.num_heads)
+        self.num_layers = kwargs.get('num_layers', defaults.num_layers)
+        self.window_size = kwargs.get('window_size', defaults.window_size)
+        self.qk_norm = kwargs.get('qk_norm', defaults.qk_norm)
+        self.cross_attn_norm = kwargs.get('cross_attn_norm', defaults.cross_attn_norm)
+        self.eps = kwargs.get('eps', defaults.eps)
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
-            in_dim, dim, kernel_size=patch_size, stride=patch_size)
+            self.in_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size)
         self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-            nn.Linear(dim, dim))
+            nn.Linear(self.text_dim, self.dim), nn.GELU(approximate='tanh'),
+            nn.Linear(self.dim, self.dim))
 
         self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+            nn.Linear(self.freq_dim, self.dim), nn.SiLU(), nn.Linear(self.dim, self.dim))
+        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(self.dim, self.dim * 6))
 
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                              window_size, qk_norm, cross_attn_norm, eps)
-            for _ in range(num_layers)
+            WanAttentionBlock(cross_attn_type, self.dim, self.ffn_dim, self.num_heads,
+                              self.window_size, self.qk_norm, self.cross_attn_norm, self.eps)
+            for _ in range(self.num_layers)
         ])
 
         # head
-        self.head = Head(dim, out_dim, patch_size, eps)
+        self.head = Head(self.dim, self.out_dim, self.patch_size, self.eps)
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
-        assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
-        d = dim // num_heads
+        assert (self.dim % self.num_heads) == 0 and (self.dim // self.num_heads) % 2 == 0
+        d = self.dim // self.num_heads
         self.freqs = torch.cat([
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
@@ -494,7 +456,7 @@ class WanModel(ModelMixin, ConfigMixin):
                                dim=1)
 
         if model_type == 'i2v' or model_type == 'flf2v':
-            self.img_emb = MLPProj(1280, dim, flf_pos_emb=model_type == 'flf2v')
+            self.img_emb = MLPProj(1280, self.dim, flf_pos_emb=model_type == 'flf2v')
 
         # initialize weights
         self.init_weights()

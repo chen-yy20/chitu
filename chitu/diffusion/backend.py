@@ -8,6 +8,8 @@ import functools
 import os
 import time
 import re
+import copy
+from argparse import Namespace
 from collections import deque
 from enum import Enum
 from glob import glob
@@ -35,7 +37,6 @@ from chitu.custom_gguf import *
 from chitu.device_type import is_ascend, is_muxi
 from chitu.distributed.parallel_state import (
     get_world_group,
-    get_pp_group,
     initialize_parallel_groups,
     initialize_diffusion_parallel_groups
 )
@@ -94,6 +95,37 @@ class DiffusionBackend:
     last_batch_results: Deque["BatchResult"] = deque()
     indexer_cache_manager = None
 
+    @staticmethod
+    def convert_config(args):
+        """
+        Yaml config can only represent lists, but some places need tuples.
+        This method aims to convert all lists in args to tuples recursively.
+        """ 
+        def _convert_value(value):
+            if isinstance(value, list):
+                # 递归转换列表中的元素，然后转为元组
+                return tuple(_convert_value(item) for item in value)
+            elif isinstance(value, dict):
+                # 递归转换字典
+                return {k: _convert_value(v) for k, v in value.items()}
+            elif hasattr(value, '__dict__'):
+                # 对于有属性的对象（如 Namespace），递归转换其属性
+                converted = copy.copy(value)
+                for attr_name in dir(value):
+                    if not attr_name.startswith('_'):  # 跳过私有属性
+                        try:
+                            attr_value = getattr(value, attr_name)
+                            if not callable(attr_value):  # 跳过方法
+                                setattr(converted, attr_name, _convert_value(attr_value))
+                        except:
+                            pass  # 如果无法访问或设置属性，跳过
+                return converted
+            else:
+                # 其他类型直接返回
+                return value
+        
+        return _convert_value(args)
+
 
     @staticmethod
     def _build_model_architecture(args, attn_backend):
@@ -108,30 +140,14 @@ class DiffusionBackend:
         model_cls = get_model_class(model_type)
         logger.info(f"Building model with args: {args.transformer}")
 
-        # 从 args.transformer 构建正确的模型参数
+        # # 从 args.transformer 构建正确的模型参数
         if args.type == "diff-wan":
-            model_kwargs = {
-                'model_type': args.task,  # 't2v'
-                'patch_size': tuple(args.transformer.patch_size),  # [1, 2, 2] -> (1, 2, 2)
-                'text_len': 512,  # 默认值或从配置获取
-                'in_dim': 16,     # 默认值
-                'dim': args.transformer.dim,           # 1536
-                'ffn_dim': args.transformer.ffn_dim,   # 8960
-                'freq_dim': args.transformer.freq_dim, # 256
-                'text_dim': 4096,  # 默认值或从配置获取
-                'out_dim': 16,     # 默认值
-                'num_heads': args.transformer.num_heads,     # 12
-                'num_layers': args.transformer.num_layers,   # 30
-                'window_size': tuple(args.transformer.window_size), # [-1, -1] -> (-1, -1)
-                'qk_norm': args.transformer.qk_norm,         # True
-                'cross_attn_norm': args.transformer.cross_attn_norm, # True
-                'eps': args.transformer.eps,             # 1e-06
-            }
+            model_kwargs = args.transformer
         else:
             ValueError(f"Unsupported model type: {args.type}")
         
         # 创建模型实例
-        model = model_cls(**model_kwargs)
+        model = model_cls(model_type=args.task, **model_kwargs)
         
         return model
     
@@ -244,40 +260,6 @@ class DiffusionBackend:
         else:
             raise NotImplementedError(f"Unsupported float_16bit_variant {args.dtype}")
 
-    @staticmethod
-    def _init_tokenizer(args):
-        """
-        Initialize the appropriate tokenizer based on model type.
-
-        Arguments:
-            args: Configuration with tokenizer settings
-
-        Returns:
-            Initialized tokenizer
-        """
-        trust_remote_code = args.models.name.startswith("glm-4")
-        force_full_seq_decode = (
-            args.models.tokenizer_force_full_seq_decode
-            if hasattr(args.models, "tokenizer_force_full_seq_decode")
-            else False
-        )
-
-        if args.models.tokenizer_type == "hf":
-            tokenizer = TokenizerHF(
-                path=args.models.tokenizer_path,
-                trust_remote_code=trust_remote_code,
-                force_full_seq_decode=force_full_seq_decode,
-            )
-        else:
-            tokenizer = Tokenizer(
-                model_path=args.models.tokenizer_path,
-                force_full_seq_decode=force_full_seq_decode,
-            )
-            assert (
-                args.models.vocab_size == tokenizer.n_words
-            ), f"{args.models.vocab_size} vs. {tokenizer.n_words}"
-
-        return tokenizer
 
     @staticmethod
     def _init_text_encoder(args):
@@ -294,10 +276,11 @@ class DiffusionBackend:
         if args.models.name == "Wan2.1-T2V-1.3B":
             from chitu.diffusion.modules.encoders.t5 import T5EncoderModel
             logger.info(f"Initializing T5 encoder for {args.models.name}")
-            
+
             text_encoder = T5EncoderModel(
                     text_len=args.models.encoder.text_len,
-                    device=torch.device('cpu'),
+                    # device=torch.device('cpu'),
+                    device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu'),
                     checkpoint_path=os.path.join(args.models.ckpt_dir, args.models.encoder.t5_checkpoint),
                     tokenizer_path=os.path.join(args.models.ckpt_dir, args.models.encoder.t5_tokenizer),
                 )
@@ -309,39 +292,30 @@ class DiffusionBackend:
         return text_encoder
 
     @staticmethod
-    def _init_formatter(args):
+    def _init_vae(args):
         """
-        Initialize the chat formatter based on model type.
+        Initialize the VAE model for diffusion.
 
         Arguments:
             args: Configuration with model settings
-
-        Returns:
-            Appropriate chat formatter instance
         """
-        if args.models.tokenizer_type == "hf":
-            return ChatFormatHF(DiffusionBackend.tokenizer, DiffusionBackend.processor)
+        if args.models.name in ["Wan2.1-T2V-1.3B"]:
+            from chitu.diffusion.modules.vaes.wan_vae import WanVAE
+            logger.info(f"Initializing Wan VAE for {args.models.name}")
+
+            vae = WanVAE(
+                    vae_pth=os.path.join(args.models.ckpt_dir, args.models.vae.checkpoint),
+                    device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu'),
+                )
+            logger.info(f"Initialized Wan VAE for {args.models.name}")
         else:
-            return ChatFormat(DiffusionBackend.tokenizer)
+            vae = None
+        return vae
 
     @staticmethod
-    def _init_cache_manager(
-        args,
-        attn_backend_type,
-        layer_filter_fn=lambda x: x,
-        num_blocks: int = None,
-    ):
-        """
-        Initialize the appropriate FEATURE CACHE manager based on configuration.
-
-        Arguments:
-            args: Configuration with cache and model settings
-
-        Returns:
-            Initialized cache manager
-        """
+    def _init_cache_manager():
+        # TODO
         pass
-
 
     @staticmethod
     def _get_attention_backend_type(args):
@@ -433,10 +407,22 @@ class DiffusionBackend:
         Returns:
             Fully set up model
         """
-        with torch.device("meta"):
-            model = DiffusionBackend._build_model_architecture(args.models, None)
-        
-        DiffusionBackend._load_checkpoint(model, args)
+        # convert args.models lists to tuples
+        args.models = DiffusionBackend.convert_config(args.models)
+
+        if not args.debug.skip_model_load:
+            # Build the model. Don't allocate memory yet.
+            with torch.device("meta"):
+                model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
+
+            # Load model parameters
+            DiffusionBackend._load_checkpoint(model, args)
+
+        else:
+            # Use initialized weights
+            model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
+
+        model.eval().requires_grad_(False)
 
         DiffusionBackend.model = model
         DiffusionBackend.args = args
@@ -457,21 +443,18 @@ class DiffusionBackend:
         # Initialize distributed environment
         DiffusionBackend._init_distributed(args)
 
-        # init_moe_impl(args)
-
         # Setup environment and basic configuration
         DiffusionBackend._setup_environment(args)
 
         # Initialize tokenizer and formatter
-        # DiffusionBackend.tokenizer = DiffusionBackend._init_tokenizer(args)
         DiffusionBackend.text_encoder = DiffusionBackend._init_text_encoder(args)
-        # DiffusionBackend.formatter = DiffusionBackend._init_formatter(args)
+        DiffusionBackend.vae = DiffusionBackend._init_vae(args)
 
         attn_backend_type = DiffusionBackend._get_attention_backend_type(args)
 
         # TODO: Initialize feature cache manager
-        DiffusionBackend.cache_manager = DiffusionBackend._init_cache_manager(args, attn_backend_type)
-        DiffusionBackend.cache_type = args.infer.cache_type
+        # DiffusionBackend.cache_manager = DiffusionBackend._init_cache_manager(args, attn_backend_type)
+        # DiffusionBackend.cache_type = args.infer.cache_type
 
         # Initialize attention backend
         attn_backend = DiffusionBackend._init_attention_backend(attn_backend_type)
@@ -496,31 +479,6 @@ class DiffusionBackend:
         gc.collect()
         torch.cuda.empty_cache()
 
-
-def load_state_dict(
-    hf_ckpt_path, *, skip_preprocess=False, filter_key: Callable[[str], bool] = None
-):
-    if not skip_preprocess:
-        path = os.path.join(hf_ckpt_path, "*.safetensors")
-    else:
-        rank = torch.distributed.get_rank()
-        path = os.path.join(hf_ckpt_path, f"model.rank{rank}.safetensors")
-
-    state_dict = {}
-    ignored_params = []
-    for file_path in tqdm(glob(path)):
-        with safe_open(file_path, framework="pt", device="cpu") as f:
-            for name in f.keys():
-                if filter_key is None or filter_key(name):
-                    param: torch.Tensor = f.get_tensor(name)
-                    state_dict[name] = param
-                else:
-                    ignored_params.append(name)
-
-    if ignored_params:
-        logger.warning(f"Ignored {len(ignored_params)} params: {ignored_params}")
-
-    return state_dict
 
 
 def memory_used():

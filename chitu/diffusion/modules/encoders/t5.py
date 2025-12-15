@@ -12,18 +12,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import AutoTokenizer
+from chitu.tokenizer import TokenizerHF
 
 __all__ = [
-    'HuggingfaceTokenizer'
     'T5Model',
     'T5Encoder',
     'T5Decoder',
     'T5EncoderModel',
 ]
 
-# ================= huggingface tokenizer ===================
-
+# ================= 文本清理工具函数 ===================
 
 def basic_clean(text):
     text = ftfy.fix_text(text)
@@ -50,23 +48,23 @@ def canonicalize(text, keep_punctuation_exact_string=None):
     return text.strip()
 
 
-class HuggingfaceTokenizer:
-
-    def __init__(self, name, seq_len=None, clean=None, **kwargs):
-        assert clean in (None, 'whitespace', 'lower', 'canonicalize')
-        self.name = name
+class T5TokenizerWrapper:
+    """Wrapper for T5 tokenizer from Chitu TokenizerHF."""
+    
+    def __init__(self, path, seq_len=None, clean=None, **kwargs):
         self.seq_len = seq_len
         self.clean = clean
-
-        # init tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(name, **kwargs)
-        self.vocab_size = self.tokenizer.vocab_size
-
+        
+        # Use chitu.tokenizer.TokenizerHF
+        self.tokenizer = TokenizerHF(path, **kwargs)
+        self.vocab_size = self.tokenizer.model.vocab_size
+    
     def __call__(self, sequence, **kwargs):
         return_mask = kwargs.pop('return_mask', False)
+        add_special_tokens = kwargs.pop('add_special_tokens', True)
 
         # arguments
-        _kwargs = {'return_tensors': 'pt'}
+        _kwargs = {'return_tensors': 'pt', 'add_special_tokens': add_special_tokens}
         if self.seq_len is not None:
             _kwargs.update({
                 'padding': 'max_length',
@@ -80,7 +78,9 @@ class HuggingfaceTokenizer:
             sequence = [sequence]
         if self.clean:
             sequence = [self._clean(u) for u in sequence]
-        ids = self.tokenizer(sequence, **_kwargs)
+        
+        # 使用TokenizerHF的底层tokenizer进行批量编码
+        ids = self.tokenizer.model(sequence, **_kwargs)
 
         # output
         if return_mask:
@@ -127,14 +127,12 @@ def init_weights(m):
 
 
 class GELU(nn.Module):
-
     def forward(self, x):
         return 0.5 * x * (1.0 + torch.tanh(
             math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
 class T5LayerNorm(nn.Module):
-
     def __init__(self, dim, eps=1e-6):
         super(T5LayerNorm, self).__init__()
         self.dim = dim
@@ -150,7 +148,6 @@ class T5LayerNorm(nn.Module):
 
 
 class T5Attention(nn.Module):
-
     def __init__(self, dim, dim_attn, num_heads, dropout=0.1):
         assert dim_attn % num_heads == 0
         super(T5Attention, self).__init__()
@@ -204,7 +201,6 @@ class T5Attention(nn.Module):
 
 
 class T5FeedForward(nn.Module):
-
     def __init__(self, dim, dim_ffn, dropout=0.1):
         super(T5FeedForward, self).__init__()
         self.dim = dim
@@ -225,7 +221,6 @@ class T5FeedForward(nn.Module):
 
 
 class T5SelfAttention(nn.Module):
-
     def __init__(self,
                  dim,
                  dim_attn,
@@ -259,7 +254,6 @@ class T5SelfAttention(nn.Module):
 
 
 class T5CrossAttention(nn.Module):
-
     def __init__(self,
                  dim,
                  dim_attn,
@@ -302,7 +296,6 @@ class T5CrossAttention(nn.Module):
 
 
 class T5RelativeEmbedding(nn.Module):
-
     def __init__(self, num_buckets, num_heads, bidirectional, max_dist=128):
         super(T5RelativeEmbedding, self).__init__()
         self.num_buckets = num_buckets
@@ -315,8 +308,6 @@ class T5RelativeEmbedding(nn.Module):
 
     def forward(self, lq, lk):
         device = self.embedding.weight.device
-        # rel_pos = torch.arange(lk).unsqueeze(0).to(device) - \
-        #     torch.arange(lq).unsqueeze(1).to(device)
         rel_pos = torch.arange(lk, device=device).unsqueeze(0) - \
             torch.arange(lq, device=device).unsqueeze(1)
         rel_pos = self._relative_position_bucket(rel_pos)
@@ -348,7 +339,6 @@ class T5RelativeEmbedding(nn.Module):
 
 
 class T5Encoder(nn.Module):
-
     def __init__(self,
                  vocab,
                  dim,
@@ -396,7 +386,6 @@ class T5Encoder(nn.Module):
 
 
 class T5Decoder(nn.Module):
-
     def __init__(self,
                  vocab,
                  dim,
@@ -453,7 +442,6 @@ class T5Decoder(nn.Module):
 
 
 class T5Model(nn.Module):
-
     def __init__(self,
                  vocab_size,
                  dim,
@@ -529,7 +517,7 @@ def _t5(name,
 
     # init tokenizer
     if return_tokenizer:
-        tokenizer = HuggingfaceTokenizer(f'google/{name}', **tokenizer_kwargs)
+        tokenizer = T5TokenizerWrapper(f'google/{name}', **tokenizer_kwargs)
         return model, tokenizer
     else:
         return model
@@ -580,9 +568,13 @@ class T5EncoderModel:
             self.model = shard_fn(self.model, sync_module_states=False)
         else:
             self.model.to(self.device)
-        # init tokenizer
-        self.tokenizer = HuggingfaceTokenizer(
-            name=tokenizer_path, seq_len=text_len, clean='whitespace')
+        
+        # init tokenizer - 使用包装的TokenizerHF
+        self.tokenizer = T5TokenizerWrapper(
+            path=tokenizer_path, 
+            seq_len=text_len, 
+            clean='whitespace'
+        )
 
     def __call__(self, texts, device):
         ids, mask = self.tokenizer(

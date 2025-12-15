@@ -16,8 +16,8 @@ encoder:
   text_len: 512
 
 vae:
-  vae_checkpoint: "Wan2.1_VAE.pth"
-  vae_stride: [4, 8, 8]
+  checkpoint: "Wan2.1_VAE.pth"
+  stride: [4, 8, 8]
 
 transformer:
   patch_size: [1, 2, 2]
