@@ -4,7 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-set -e
+# FIX: set -e
+set -x 
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <num_nodes> <num_gpus_per_node> [[additional srun args]... --] [your command after torchrun]..."

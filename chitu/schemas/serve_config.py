@@ -58,6 +58,15 @@ class InferConfig:
     moe: MoEConfig = MISSING
     mtp_size: int = MISSING
 
+    @dataclass
+    class DiffusionConfig:
+        denoising_steps: int = MISSING
+        guidance_scale: float = MISSING
+        cp_size: int = MISSING
+        up_limit: int = MISSING
+
+    diffusion: DiffusionConfig = MISSING
+
 
 @dataclass
 class RequestConfig:

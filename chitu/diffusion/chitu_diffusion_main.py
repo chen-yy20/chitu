@@ -12,7 +12,9 @@ import psutil
 import torch
 import torch.distributed
 
-from chitu.backend import Backend, BackendState
+from chitu.diffusion.backend import DiffusionBackend as Backend
+from chitu.backend import BackendState
+
 from chitu.cache_manager import PagedKVCacheManager
 from chitu.device_type import is_nvidia
 from chitu.executor import Executor
@@ -408,25 +410,34 @@ def warmup_engine(args):
 
 
 def check_checkpoint_path(args):
+    '''
+    Check path: VAE, Text Encoder, Transformers
+    '''
+
     if args.models.ckpt_dir is None:
         raise ValueError(
             f"No checkpoint path provided. You can set it in command line by adding `models.ckpt_dir=<path>`. The model {args.models.name} can be downloaded from {args.models.source}"
         )
-    if args.models.tokenizer_path is None:
-        logger.info(
-            f"Using {args.models.ckpt_dir} as the path to tokenizer. If the tokenizer has a different path, please set in command line by adding `models.tokenizer_path=<path>`"
-        )
-        args.models.tokenizer_path = args.models.ckpt_dir
-    if hasattr(args.models, "processor_path") and args.models.processor_path is None:
-        logger.info(
-            f"Using {args.models.ckpt_dir} as the path to processor. If the processor has a different path, please set in command line by adding `models.processor_path=<path>`"
-        )
-        args.models.processor_path = args.models.ckpt_dir
+    # if args.models.tokenizer_path is None:
+    #     logger.info(
+    #         f"Using {args.models.ckpt_dir} as the path to tokenizer. If the tokenizer has a different path, please set in command line by adding `models.tokenizer_path=<path>`"
+    #     )
+    #     args.models.tokenizer_path = args.models.ckpt_dir
+    # if hasattr(args.models, "processor_path") and args.models.processor_path is None:
+    #     logger.info(
+    #         f"Using {args.models.ckpt_dir} as the path to processor. If the processor has a different path, please set in command line by adding `models.processor_path=<path>`"
+    #     )
+    #     args.models.processor_path = args.models.ckpt_dir
 
 
 def chitu_init(args, logging_level=None):
+    '''
+    1. Init logger 
+    2. Set parameters and environment variables
+    3. Load models from checkpoint
+    '''
+
     debug = os.getenv("CHITU_DEBUG", "0") == "1"
-    debug = 1 # FIXME: force debug mode for development
 
     if (
         is_nvidia()
@@ -435,128 +446,129 @@ def chitu_init(args, logging_level=None):
     ):
         os.environ["NCCL_NVLS_NCHANNELS"] = "32"
 
-    if (
-        args.models.type == "deepseek-v3"
-        and args.models.n_layers == 61
-        and args.infer.mtp_size > 1
-    ):
-        args.models.n_layers += 1
+    # if (
+    #     args.models.type == "deepseek-v3"
+    #     and args.models.n_layers == 61
+    #     and args.infer.mtp_size > 1
+    # ):
+    #     args.models.n_layers += 1
 
     if logging_level is None:
         logging_level = logging.DEBUG if debug else logging.INFO
     init_logger(logging_level)
 
     # Deal with legacy arguments
-    if hasattr(args.infer, "soft_fp8") and args.infer.soft_fp8:
-        logger.warning(
-            "Argument `infer.soft_fp8=True` is deprecated. Use `infer.raise_lower_bit_float_to=bfloat16` instead."
-        )
-        args.infer.raise_lower_bit_float_to = "bfloat16"
-    if hasattr(args, "dtype") and args.dtype is not None:
-        logger.warning(
-            "Argument `dtype` is deprecated. Use `float_16bit_variant` instead."
-        )
-        args.float_16bit_variant = args.dtype
-    if hasattr(args.infer, "do_load") and not args.infer.do_load:
-        logger.warning(
-            "Argument `infer.do_load=False` is deprecated. Use `debug.skip_model_load=True` instead."
-        )
-        args.debug.skip_model_load = True
+    # if hasattr(args.infer, "soft_fp8") and args.infer.soft_fp8:
+    #     logger.warning(
+    #         "Argument `infer.soft_fp8=True` is deprecated. Use `infer.raise_lower_bit_float_to=bfloat16` instead."
+    #     )
+    #     args.infer.raise_lower_bit_float_to = "bfloat16"
+    # if hasattr(args, "dtype") and args.dtype is not None:
+    #     logger.warning(
+    #         "Argument `dtype` is deprecated. Use `float_16bit_variant` instead."
+    #     )
+    #     args.float_16bit_variant = args.dtype
+    # if hasattr(args.infer, "do_load") and not args.infer.do_load:
+    #     logger.warning(
+    #         "Argument `infer.do_load=False` is deprecated. Use `debug.skip_model_load=True` instead."
+    #     )
+    #     args.debug.skip_model_load = True
 
     # prefill_chunk_size default value: 4096 * dp_size
-    if args.infer.prefill_chunk_size == "auto":
-        args.infer.prefill_chunk_size = 4096 * args.infer.dp_size
+    # if args.infer.prefill_chunk_size == "auto":
+    #     args.infer.prefill_chunk_size = 4096 * args.infer.dp_size
 
-    if (
-        args.infer.prefill_chunk_size is not None
-        and args.infer.prefill_chunk_size > args.infer.max_reqs * args.infer.max_seq_len
-    ):
-        logger.warning(
-            f"infer.prefill_chunk_size ({args.infer.prefill_chunk_size}) is larger than "
-            f"infer.max_reqs ({args.infer.max_reqs}) * infer.max_seq_len "
-            f"({args.infer.max_seq_len}), which has no effect. Reducing it to infer.max_reqs "
-            f" * infer.max_seq_len."
-        )
-        args.infer.prefill_chunk_size = args.infer.max_reqs * args.infer.max_seq_len
+    # if (
+    #     args.infer.prefill_chunk_size is not None
+    #     and args.infer.prefill_chunk_size > args.infer.max_reqs * args.infer.max_seq_len
+    # ):
+    #     logger.warning(
+    #         f"infer.prefill_chunk_size ({args.infer.prefill_chunk_size}) is larger than "
+    #         f"infer.max_reqs ({args.infer.max_reqs}) * infer.max_seq_len "
+    #         f"({args.infer.max_seq_len}), which has no effect. Reducing it to infer.max_reqs "
+    #         f" * infer.max_seq_len."
+    #     )
+    #     args.infer.prefill_chunk_size = args.infer.max_reqs * args.infer.max_seq_len
 
-    if args.infer.prefill_chunk_size is not None:
-        if args.infer.dp_size > 1 and args.infer.pp_size > 1:
-            logger.warning(
-                "Disabling infer.prefill_chunk_size because it is not compatible with DP+PP yet"
-            )
-            args.infer.prefill_chunk_size = None
-        if args.infer.pp_size > 1 and args.infer.cache_type == "skew":
-            logger.warning(
-                "Disabling infer.prefill_chunk_size because it is not compatible with PP+skew yet"
-            )
-            args.infer.prefill_chunk_size = None
+    # if args.infer.prefill_chunk_size is not None:
+    #     if args.infer.dp_size > 1 and args.infer.pp_size > 1:
+    #         logger.warning(
+    #             "Disabling infer.prefill_chunk_size because it is not compatible with DP+PP yet"
+    #         )
+    #         args.infer.prefill_chunk_size = None
+    #     if args.infer.pp_size > 1 and args.infer.cache_type == "skew":
+    #         logger.warning(
+    #             "Disabling infer.prefill_chunk_size because it is not compatible with PP+skew yet"
+    #         )
+    #         args.infer.prefill_chunk_size = None
 
-    args.infer.has_schedule_overlap = (
-        args.infer.dp_size <= 1 and args.infer.pp_size <= 1
-    )
+    # args.infer.has_schedule_overlap = (
+    #     args.infer.dp_size <= 1 and args.infer.pp_size <= 1
+    # )
 
     # Bind process to CPU NUMA
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-    if args.infer.bind_process_to_cpu == "auto":
-        if not has_cpuinfer and not has_numa:
-            args.infer.bind_process_to_cpu = "none"
-        elif not has_numa:
-            logger.warning(
-                "'cpuinfer' is found but 'numa' is mising. Disabling NUMA binding. "
-                "For better CPU inference performance, please refer to README.md and "
-                "install the full '[cpu]' optional dependency."
-            )
-            args.infer.bind_process_to_cpu = "none"
-        elif not numa.available():
-            logger.warning(
-                "NUMA is not support on this OS or hardware platform. Disabling NUMA binding."
-            )
-            args.infer.bind_process_to_cpu = "none"
-        elif numa.get_max_node() + 1 < local_world_size:
-            logger.info("Disable NUMA binding due to insufficient NUMA nodes.")
-            args.infer.bind_process_to_cpu = "none"
-        else:
-            args.infer.bind_process_to_cpu = "numa"
-    if args.infer.bind_process_to_cpu == "numa":
-        numa.bind({local_rank})
-    elif args.infer.bind_process_to_cpu == "none":
-        pass
-    else:
-        raise ValueError(
-            f"Unsupported infer.bind_process_to_cpu={args.infer.bind_process_to_cpu}"
-        )
+    # local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    # local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+    # if args.infer.bind_process_to_cpu == "auto":
+    #     if not has_cpuinfer and not has_numa:
+    #         args.infer.bind_process_to_cpu = "none"
+    #     elif not has_numa:
+    #         logger.warning(
+    #             "'cpuinfer' is found but 'numa' is mising. Disabling NUMA binding. "
+    #             "For better CPU inference performance, please refer to README.md and "
+    #             "install the full '[cpu]' optional dependency."
+    #         )
+    #         args.infer.bind_process_to_cpu = "none"
+    #     elif not numa.available():
+    #         logger.warning(
+    #             "NUMA is not support on this OS or hardware platform. Disabling NUMA binding."
+    #         )
+    #         args.infer.bind_process_to_cpu = "none"
+    #     elif numa.get_max_node() + 1 < local_world_size:
+    #         logger.info("Disable NUMA binding due to insufficient NUMA nodes.")
+    #         args.infer.bind_process_to_cpu = "none"
+    #     else:
+    #         args.infer.bind_process_to_cpu = "numa"
+    # if args.infer.bind_process_to_cpu == "numa":
+    #     numa.bind({local_rank})
+    # elif args.infer.bind_process_to_cpu == "none":
+    #     pass
+    # else:
+    #     raise ValueError(
+    #         f"Unsupported infer.bind_process_to_cpu={args.infer.bind_process_to_cpu}"
+    #     )
 
-    if args.infer.use_cuda_graph == "auto":
-        if args.models.name in [
-            "Mixtral-8x7B-Instruct-v0.1",
-            "Qwen3-30B-A3B-mix-fp4-fp8",
-            "Qwen3-Next-80B-A3B-Instruct",
-        ]:
-            args.infer.use_cuda_graph = False
-        elif (
-            args.infer.ep_size > 1
-            and args.infer.dp_size > 1
-            and (args.infer.tp_size > 1 or not has_deep_ep)
-        ):
-            args.infer.use_cuda_graph = False
-        elif args.infer.attn_type == "ref":
-            args.infer.use_cuda_graph = False
-        elif args.infer.op_impl is not None and args.infer.op_impl == "cpu":
-            args.infer.use_cuda_graph = False
-        elif (
-            args.models is not None
-            and str(args.models).find("'backend': 'cpuinfer'") != -1
-        ):
-            args.infer.use_cuda_graph = False
-        elif (
-            args.infer.attn_type == "npu"
-            and args.infer.cache_type == "paged"
-            and (args.models.type is not None and args.models.type == "deepseek-v3")
-        ):
-            args.infer.use_cuda_graph = False
-        else:
-            args.infer.use_cuda_graph = True
+    # TODO: Support cuda graph
+    # if args.infer.use_cuda_graph == "auto":
+    #     if args.models.name in [
+    #         "Mixtral-8x7B-Instruct-v0.1",
+    #         "Qwen3-30B-A3B-mix-fp4-fp8",
+    #         "Qwen3-Next-80B-A3B-Instruct",
+    #     ]:
+    #         args.infer.use_cuda_graph = False
+    #     elif (
+    #         args.infer.ep_size > 1
+    #         and args.infer.dp_size > 1
+    #         and (args.infer.tp_size > 1 or not has_deep_ep)
+    #     ):
+    #         args.infer.use_cuda_graph = False
+    #     elif args.infer.attn_type == "ref":
+    #         args.infer.use_cuda_graph = False
+    #     elif args.infer.op_impl is not None and args.infer.op_impl == "cpu":
+    #         args.infer.use_cuda_graph = False
+    #     elif (
+    #         args.models is not None
+    #         and str(args.models).find("'backend': 'cpuinfer'") != -1
+    #     ):
+    #         args.infer.use_cuda_graph = False
+    #     elif (
+    #         args.infer.attn_type == "npu"
+    #         and args.infer.cache_type == "paged"
+    #         and (args.models.type is not None and args.models.type == "deepseek-v3")
+    #     ):
+    #         args.infer.use_cuda_graph = False
+    #     else:
+    #         args.infer.use_cuda_graph = True
 
     # Check checkpoint exists
     check_checkpoint_path(args)

@@ -801,6 +801,7 @@ class Executor:
         return tensor
 
     def step(self, tasks: Optional[PackedTasksBase]) -> torch.Tensor:
+        # 把调度器给的 task 翻译成 GPU/CPU kernel → 跑完 → 把 logits 放到正确位置，同时把该回收的 KV-cache 立即回收
         # 1. propagate tasks and handle special payload type
         payload_type = tasks.payload_type if tasks is not None else None
         for dispatcher in self.task_dispatchers:

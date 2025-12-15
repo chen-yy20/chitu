@@ -1,0 +1,2 @@
+echo $PYTHONPATH
+./script/srun_multi_node.sh 1 2 test/cyy_test/single_req_test.py models=Qwen2.5-0.5B models.ckpt_dir="/home/zhongrx/cyy/model/qwen2.5-0.5B" infer.dp_size=2 infer.tp_size=1 infer.pp_size=1 infer.attn_type=flash_attn
