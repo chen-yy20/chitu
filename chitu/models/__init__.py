@@ -12,3 +12,6 @@ from chitu.models import model_hf_glm_4_moe  # NOQA
 from chitu.models import model_hf_gpt_oss  # NOQA
 from chitu.models import model_hf_mixtral  # NOQA
 from chitu.models import model_llama  # NOQA
+
+# diffusion
+from chitu.models.diffusion import model_wan_21  # NOQA

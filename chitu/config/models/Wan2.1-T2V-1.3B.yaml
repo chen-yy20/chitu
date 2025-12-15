@@ -1,19 +1,32 @@
 name: Wan2.1-T2V-1.3B
-type: diffusers
+type: diff-wan
 source: "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B" # Just for displaying. No automatic download.
-ckpt_dir: null # Please override this in commond line with `models.ckpt_dir=<path>`.
-tokenizer_path: null # By default the same as ckpt_dir, or you can override it with `models.tokenizer_path=<path>`.
+ckpt_dir: null # Please override this in commond line with `models.ckpt_dir:<path>`.
+tokenizer_path: null # By default the same as ckpt_dir, or you can override it with `models.tokenizer_path:<path>`.
 tokenizer_type: "hf" # one of: hf, tiktoken
-dim: 5120
-n_layers: 30
-n_heads: 48
-n_kv_heads: 48
-vocab_size: 151936
-intermediate_dim: 17408
-norm_eps: 1e-06
-rope_theta: 1000000.0
-qkv_has_bias: False
-head_dim: 128
-use_qk_norm: True
+
+task: t2v
 denoising_steps: 50
 guidance_scale: 7.5
+
+encoder:
+  t5_checkpoint: "models_t5_umt5-xxl-enc-bf16.pth"
+  t5_tokenizer: "google/umt5-xxl"
+  t5_model: "umt5-xxl"
+  text_len: 512
+
+vae:
+  vae_checkpoint: "Wan2.1_VAE.pth"
+  vae_stride: [4, 8, 8]
+
+transformer:
+  patch_size: [1, 2, 2]
+  dim: 1536
+  ffn_dim: 8960
+  freq_dim: 256
+  num_heads: 12
+  num_layers: 30
+  window_size: [-1, -1]
+  qk_norm: True
+  cross_attn_norm: True
+  eps: 1e-6
