@@ -576,11 +576,15 @@ class T5EncoderModel:
             clean='whitespace'
         )
 
-    def __call__(self, texts, device):
+    def __call__(self, text, device):
+        texts = [text]
         ids, mask = self.tokenizer(
             texts, return_mask=True, add_special_tokens=True)
         ids = ids.to(device)
         mask = mask.to(device)
         seq_lens = mask.gt(0).sum(dim=1).long()
         context = self.model(ids, mask)
-        return [u[:v] for u, v in zip(context, seq_lens)]
+        assert len(context) == 1 and len(seq_lens) == 1
+        txt_emb = context[0]
+        return txt_emb[:seq_lens[0]]
+        # return [u[:v] for u, v in zip(context, seq_lens)]

@@ -6,8 +6,6 @@ tokenizer_path: null # By default the same as ckpt_dir, or you can override it w
 tokenizer_type: "hf" # one of: hf, tiktoken
 
 task: t2v
-denoising_steps: 50
-guidance_scale: 7.5
 
 encoder:
   t5_checkpoint: "models_t5_umt5-xxl-enc-bf16.pth"

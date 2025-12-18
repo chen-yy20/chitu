@@ -6,59 +6,60 @@ import random
 import logging
 from logging import getLogger
 
-from chitu.task import UserRequest, TaskPool, Task
 from chitu.diffusion.chitu_diffusion_main import (
     chitu_init,
-    chitu_run,
-    chitu_start,
-    chitu_terminate,
-    chitu_is_terminated,
-    warmup_engine,
+    chitu_generate,
+    warmup_diffusion_engine,
 )
+
+# from chitu.task import UserRequest, TaskPool, Task
+from chitu.diffusion.task import DiffusionUserRequest, DiffusionTask, DiffusionTaskPool, DiffusionParams
+
 from chitu.global_vars import get_timers
 from chitu.schemas import ServeConfig
 from chitu.utils import get_config_dir_path, gen_req_id
 
 logger = getLogger(__name__)
 
+# Default wan params
+# 需要注意区分：系统参数 / 模型参数 config / 用户参数 params
+default_diffusion_params = DiffusionParams(
+    seed=42,
+    frame_num=81,
+    size=(1280,720),
+    negative_prompt='色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走',
+    sample_shift=5.0,
+    guidance_scale=7.5,
+    num_inference_steps=50,
+    sample_solver='unipc',
+)
+
+
 # T2V prompts
-prmpts = [
+msgs = [
     [{"role": "user", "content": "A cat walking on the grass."}],
     [{"role": "user", "content": "Two beautiful asian girls."}],
     [{"role": "user", "content": "一名宇航员在火星上拍照。"}],
 ]
 
-# TI2V prompts
-prmpts_vl = []
-
 def gen_reqs(num_reqs, max_new_tokens, frequency_penalty, is_vl=False):
-    # 请求应该包含prompt，size等信息
-    reqs: list[UserRequest] = []
+    # TODO: 请求应该包含prompt，size等信息，同时对最大负载进行控制
+    reqs: list[DiffusionUserRequest] = []
     for i in range(num_reqs):
-        if is_vl:
-            req = UserRequest(
-                prmpts_vl[i % len(prmpts_vl)],
-                f"{gen_req_id()}",
-                max_new_tokens=max_new_tokens,
-                frequency_penalty=frequency_penalty,
-                temperature=1,
-            )
-        else:
-            req = UserRequest(
-                prmpts[i % len(prmpts)],
-                f"{gen_req_id()}",
-                max_new_tokens=max_new_tokens,
-                frequency_penalty=frequency_penalty,
-                temperature=1,
-            )
+        req = DiffusionUserRequest(
+            message = msgs[i % len(msgs)],
+            request_id = f"{gen_req_id()}",
+            params=default_diffusion_params,
+        )
         reqs.append(req)
     return reqs
 
 def run_normal(args, timers):
     rank = torch.distributed.get_rank()
-    warmup_engine(args)
+    warmup_diffusion_engine(args)
     logger.info("chitu warmup engine.")
 
+    # 重复执行
     for i in range(1):
         reqs = gen_reqs(
             num_reqs=args.infer.max_reqs,
@@ -67,15 +68,18 @@ def run_normal(args, timers):
             is_vl=hasattr(args.models, "vision_config"),
         )
         logger.info(f'{reqs=}')
+        
+        # 已有的request加入
         for req in reqs:
-            TaskPool.add(Task(req.request_id, req, stop_with_eos=True))
+            DiffusionTaskPool.add(DiffusionTask(req.request_id, req))
+            
         logger.info(f"------ batch {i} ------")
         t_start = time.time()
+        
         timers("overall").start()
         tokens = 0
-        while len(TaskPool.pool) > 0:
-            tokens += 1
-            chitu_run()
+        while len(DiffusionTaskPool.pool) > 0:
+            chitu_generate()
 
         print("GPU memory used : ", torch.cuda.memory_allocated())
         timers("overall").stop()
@@ -100,13 +104,11 @@ def main(args: ServeConfig):
     logger.info(f"Run with args: {args}")
 
     chitu_init(args, logging_level=logging.INFO)
-    exit()
     logger.info("initialized chitu.")
     torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
     timers = get_timers()
     logger.debug("finish init")
-    
     
     run_normal(args, timers)
 

@@ -9,6 +9,8 @@ import os
 import time
 import re
 import copy
+import torch.cuda.amp as amp
+
 from argparse import Namespace
 from collections import deque
 from enum import Enum
@@ -56,13 +58,11 @@ from chitu.utils import (
 )
 
 # from chitu.distributed.moe_token_dispatcher import init_token_dispatcher
-from chitu.moe import init_moe_impl
 from chitu.backend import BackendState
-
 if TYPE_CHECKING:
-    from chitu.executor import Executor, OngoingRequests
-    from chitu.scheduler import Scheduler
-    from chitu.task import BatchResult
+    from chitu.diffusion.generator import Generator
+    from chitu.diffusion.scheduler import DiffusionScheduler
+    # from chitu.diffusion.task import BatchResult
 
 numa, has_numa = try_import_opt_dep("numa", "cpu")
 cpuinfer, has_cpuinfer = try_import_opt_dep("cpuinfer", "cpu")
@@ -74,10 +74,7 @@ logger = getLogger(__name__)
 class DiffusionBackend:
     # init once
     model = None
-    text_encoder = None
-    cache_manager = None
     formatter = None
-    vae = None
     args = None
     # --- cache_manager related (not used in the current code)
     curr_req_ids = None
@@ -87,13 +84,19 @@ class DiffusionBackend:
     group_gloo = None
 
     # components
-    scheduler: Optional["Scheduler"] = None
+    scheduler: Optional["DiffusionScheduler"] = None
 
     # mutable
-    ongoing_reqs: list["OngoingRequests"] = []
+    # ongoing_reqs: list["OngoingRequests"] = []
     state = BackendState.Running
-    last_batch_results: Deque["BatchResult"] = deque()
+    # last_batch_results: Deque["BatchResult"] = deque()
     indexer_cache_manager = None
+    
+    # diffusion
+    generator: Optional["Generator"] = None
+    text_encoder = None
+    cache_manager = None
+    vae = None
 
     @staticmethod
     def convert_config(args):
@@ -311,7 +314,7 @@ class DiffusionBackend:
         else:
             vae = None
         return vae
-
+    
     @staticmethod
     def _init_cache_manager():
         # TODO
@@ -403,7 +406,7 @@ class DiffusionBackend:
         Arguments:
             args: Configuration with model settings
             attn_backend: The initialized attention backend
-
+∑
         Returns:
             Fully set up model
         """
@@ -469,7 +472,6 @@ class DiffusionBackend:
             f"Using {len(c10d._pg_map)} communication gruops. If this number is too high, there may be too much memory reserved for underlying communication libraries."
         )
 
-        exit()
         return DiffusionBackend
 
     @staticmethod
