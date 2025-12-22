@@ -199,7 +199,7 @@ class Generator:
         # Prepare Solver and Timestep
         if task.req.params.sample_solver == 'unipc': # 求解器
             sample_scheduler = FlowUniPCMultistepScheduler(
-                num_train_timesteps=50,
+                num_train_timesteps=1000,
                 shift=1,
                 use_dynamic_shifting=False)
             sample_scheduler.set_timesteps(
@@ -210,7 +210,7 @@ class Generator:
             timesteps = sample_scheduler.timesteps
         elif task.req.params.sample_solver == 'dpm++':
             sample_scheduler = FlowDPMSolverMultistepScheduler(
-                num_train_timesteps=50, 
+                num_train_timesteps=1000, 
                 shift=1,
                 use_dynamic_shifting=False)
             sampling_sigmas = get_sampling_sigmas(task.req.params.num_inference_steps, task.req.params.sample_shift)
