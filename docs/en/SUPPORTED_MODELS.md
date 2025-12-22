@@ -138,6 +138,8 @@ This page is auto-generated. Data source: `chitu/config/models/*.yaml`. To updat
   Usage: Append `models=Qwen3-235B-A22B` command line argument when starting Chitu
 - Qwen3-235B-A22B-ascend-int8
   Usage: Append `models=Qwen3-235B-A22B-ascend-int8` command line argument when starting Chitu
+- Qwen3-235B-A22B-fp4
+  Usage: Append `models=Qwen3-235B-A22B-fp4` command line argument when starting Chitu
 - Qwen3-235B-A22B-fp8
   Usage: Append `models=Qwen3-235B-A22B-fp8` command line argument when starting Chitu
 - Qwen3-30B-A3B
@@ -186,6 +188,8 @@ This page is auto-generated. Data source: `chitu/config/models/*.yaml`. To updat
   Usage: Append `models=Qwen3-Coder-480B-A35B-Instruct-fp8` command line argument when starting Chitu
 - Qwen3-Next-80B-A3B-Instruct
   Usage: Append `models=Qwen3-Next-80B-A3B-Instruct` command line argument when starting Chitu
+- Qwen3-Next-80B-A3B-Instruct-FP8
+  Usage: Append `models=Qwen3-Next-80B-A3B-Instruct-FP8` command line argument when starting Chitu
 - Seed-OSS-36B-Instruct
   Usage: Append `models=Seed-OSS-36B-Instruct` command line argument when starting Chitu
 - glm-4-9b-chat

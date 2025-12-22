@@ -8,6 +8,7 @@ from logging import getLogger
 from typing import Any, Mapping, Optional
 from contextlib import nullcontext
 
+from chitu.task_type import TaskType
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -16,7 +17,10 @@ from chitu.device_type import is_muxi
 from chitu.attn_backend import AttnBackend, NpuAttnBackend
 from chitu.batched_freqs_cis import BatchedFreqsCis
 from chitu.cache_manager import PagedKVCacheManager, DenseKVCacheManager
-from chitu.cuda_graph import make_dispatched_graphed_callables
+from chitu.cuda_graph import (
+    make_dispatched_graphed_callables,
+    cuda_graph_safe_cached_property,
+)
 from chitu.device_type import is_ascend
 from chitu.global_vars import get_global_args, get_timers
 from chitu.muxi_utils import (
@@ -33,6 +37,8 @@ from chitu.distributed.parallel_state import (
     get_ep_size,
     get_dp_group,
     get_dp_size,
+    get_pp_group,
+    get_pp_size,
 )
 from chitu.moe import get_moe_impl
 from chitu.moe.batched_routed_activation import IndexedBatchedRoutedActivation
@@ -52,6 +58,8 @@ from chitu.quantization import (
 )
 from chitu.hybrid_device import CPUParameter
 from chitu.static_tensor import StaticTensor
+
+from chitu.moe.load_balancer import get_moe_load_planner
 
 chitu_backend, has_chitu_backend = try_import_platform_dep("chitu_backend")
 triton, has_triton = try_import_platform_dep("triton")
@@ -201,7 +209,7 @@ class Transformer(nn.Module):
         *,
         max_position_embeddings: int,
         pipeline_parallel_size: int,
-        model_parallel_size: int,
+        tensor_parallel_size: int,
         attn_backend: AttnBackend,
         op_impl: str,
         **kvargs,
@@ -218,20 +226,18 @@ class Transformer(nn.Module):
         self.device = torch.device(self.local_rank)
 
         self.pipeline_parallel_size = pipeline_parallel_size
-        self.model_parallel_size = model_parallel_size
+        self.tensor_parallel_size = tensor_parallel_size
         self.pipeline_exec = pipeline_parallel_size > 1
-        self.tensor_exec = model_parallel_size > 1
+        self.tensor_exec = tensor_parallel_size > 1
 
-        self.tp_size = model_parallel_size
+        self.tp_size = tensor_parallel_size
         self.pp_size = pipeline_parallel_size
         self.dp_size = get_dp_size()
         self.ep_group = get_ep_group()
         self.ep_size = self.ep_group.group_size
-        self.pp_stage = (
-            self.rank % (self.world_size // self.dp_size) // self.model_parallel_size
-        )
-        self.pp_main_rank = (self.rank // model_parallel_size) * model_parallel_size
-        self.pp_end_stage = (self.world_size // self.dp_size - 1) // model_parallel_size
+        self.pp_stage = get_pp_group().rank_in_group
+        self.pp_main_rank = (self.rank // tensor_parallel_size) * tensor_parallel_size
+        self.pp_end_stage = get_pp_size() - 1
 
         self.params = params
         self.vocab_size = params.vocab_size
@@ -298,6 +304,8 @@ class Transformer(nn.Module):
                 dtype=torch.bfloat16,
                 device=self.device,
             )
+            self.main_last_hidden_states_up_to_date = False
+            self.lhs_ = None
 
     def _get_tensor_column_parallel_layer_names(self) -> list[str]:
         raise NotImplementedError
@@ -369,12 +377,12 @@ class Transformer(nn.Module):
         checkpoint: dict[str, Any],
         num_layers: int,
         rank: int,
-        world_size: int,
+        pp_size: int,
     ):
         keys = checkpoint.keys()
         partial_checkpoint = {}
 
-        num_layers_of_each_rank = compute_layer_dist_in_pipe(num_layers, world_size)
+        num_layers_of_each_rank = compute_layer_dist_in_pipe(num_layers, pp_size)
         first_layer_id_of_each_rank = list(
             itertools.accumulate([0] + num_layers_of_each_rank)
         )
@@ -403,7 +411,7 @@ class Transformer(nn.Module):
         self,
         checkpoint: dict[str, Any],
         rank: int,
-        world_size: int,
+        tp_size: int,
     ):
         partial_checkpoint = {}
 
@@ -428,8 +436,11 @@ class Transformer(nn.Module):
                     if param.shape[0] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[0] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=0)
+                        if param.shape[0] % tp_size != 0:
+                            raise RuntimeError(
+                                f"Tensor {name}'s first dim {param.shape[0]} should be divisible by tp_size {tp_size}"
+                            )
+                        chunks = torch.chunk(param, tp_size, dim=0)
                         partial_checkpoint[name] = chunks[rank]
                 elif name.split(".")[-1] in self._get_1d_in_tensor_names(quant):
                     assert (
@@ -444,8 +455,11 @@ class Transformer(nn.Module):
                     if param.shape[0] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[0] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=0)
+                        if param.shape[0] % tp_size != 0:
+                            raise RuntimeError(
+                                f"Tensor {name}'s first dim {param.shape[0]} should be divisible by tp_size {tp_size}"
+                            )
+                        chunks = torch.chunk(param, tp_size, dim=0)
                         partial_checkpoint[name] = chunks[rank]
                 elif name.split(".")[-1] in self._get_2d_in_x_out_tensor_names(quant):
                     assert (
@@ -454,8 +468,11 @@ class Transformer(nn.Module):
                     if param.shape[1] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[1] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=1)
+                        if param.shape[1] % tp_size != 0:
+                            raise RuntimeError(
+                                f"Tensor {name}'s second dim {param.shape[1]} should be divisible by tp_size {tp_size}"
+                            )
+                        chunks = torch.chunk(param, tp_size, dim=1)
                         partial_checkpoint[name] = chunks[rank]
                 else:
                     # FIXME: Support quant=llmint8 for TP
@@ -469,8 +486,11 @@ class Transformer(nn.Module):
                     if param.shape[0] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[0] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=0)
+                        if param.shape[0] % tp_size != 0:
+                            raise RuntimeError(
+                                f"Tensor {name}'s first dim {param.shape[0]} should be divisible by tp_size {tp_size}"
+                            )
+                        chunks = torch.chunk(param, tp_size, dim=0)
                         partial_checkpoint[name] = chunks[rank]
                 elif name.split(".")[-1] in self._get_1d_out_tensor_names(quant):
                     assert (
@@ -487,8 +507,11 @@ class Transformer(nn.Module):
                     if param.shape[1] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[1] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=1)
+                        if param.shape[1] % tp_size != 0:
+                            raise RuntimeError(
+                                f"Tensor {name}'s second dim {param.shape[1]} should be divisible by tp_size {tp_size}"
+                            )
+                        chunks = torch.chunk(param, tp_size, dim=1)
                         partial_checkpoint[name] = chunks[rank]
                 elif name.split(".")[-1] in self._get_2d_in_x_out_tensor_names(quant):
                     assert (
@@ -497,8 +520,8 @@ class Transformer(nn.Module):
                     if param.shape[0] == 1:  # Broadcast
                         partial_checkpoint[name] = param
                     else:
-                        assert param.shape[0] % world_size == 0
-                        chunks = torch.chunk(param, world_size, dim=0)
+                        assert param.shape[0] % tp_size == 0
+                        chunks = torch.chunk(param, tp_size, dim=0)
                         partial_checkpoint[name] = chunks[rank]
                 else:
                     # FIXME: Support quant=llmint8 for TP
@@ -775,6 +798,12 @@ class Transformer(nn.Module):
             ],
         )
 
+    @cuda_graph_safe_cached_property(
+        "main_last_hidden_states_static", "main_last_hidden_states_up_to_date"
+    )
+    def set_main_last_hidden_states_static(self):
+        return self.lhs_
+
     @torch.inference_mode()
     def prefill_no_pipeline(
         self, tokens, output_token_offsets: torch.Tensor, **args
@@ -782,6 +811,7 @@ class Transformer(nn.Module):
         freqs_cis = self.prepare_freqs_cis()
         h = self._pre_layers(tokens, **args)
         if self.mtp_size > 1:
+            self.cache.seq_len_delta.is_decode_stage = False
             self.token_offset_list = None
             self.mtp_token_list = None
             for it, layer in enumerate(self.layers[0:-1]):
@@ -815,8 +845,8 @@ class Transformer(nn.Module):
         else:
             for it, layer in enumerate(self.layers[0:-1]):
                 h = layer(h, freqs_cis, False)
-            lhs_ = self.norm(h, compute_dtype=h.dtype)
-            self.main_last_hidden_states_static.set(lhs_)
+            self.lhs_ = self.norm(h, compute_dtype=h.dtype)
+            self.set_main_last_hidden_states_static
         h = self._post_layers(h)
         h = h.float()
         return h
@@ -844,17 +874,25 @@ class Transformer(nn.Module):
             tokens = torch.argmax(h, dim=-1)
             token_list.append(tokens)
         self.cache.update_page_offs()
+        self.main_last_hidden_states_up_to_date = False
         tokens_proposal = torch.stack(token_list[:-1], dim=1).view(-1)
         if self.use_cuda_graph:
+            self.cache.seq_len_delta.is_decode_stage = True
             self.prepare_decoding_attn()
         else:
             self.attn_backend.prepare_metadata_for_prefill(self.cache.seq_len_delta)
+            if (
+                self.moe_impl is not None
+                and self.moe_impl.decode_token_dispatcher_impl == "allgather"
+            ):
+                self.moe_impl.prepare(TaskType.Decode, tokens_proposal.shape[0])
         h = func(key, tokens_proposal)
         tokens_proposal = tokens_proposal.view(-1, self.mtp_size)
         tokens_verify = torch.argmax(h, dim=-1).view(-1, self.mtp_size)
         h = h.view(-1, self.mtp_size, h.shape[-1])
         mlh_ = self.main_last_hidden_states_static.get()
         mtp_last_hidden_states = mlh_.view(-1, self.mtp_size, mlh_.shape[-1])
+        assert h.shape[0] == mtp_last_hidden_states.shape[0]
         matches = tokens_proposal[:, 1:] == tokens_verify[:, :-1]
 
         all_accept = matches.all(dim=1)
@@ -1152,6 +1190,7 @@ class ParallelMoeBlock(nn.Module):
         gate (MoeGate): The gating layer.
         experts (QuantizedMoeExpertsBase): The layer containing routed experts + fused shared experts
         non_fused_shared_experts (Optional[nn.Module]): Optional layer for shared experts if not fused.
+        layer_id (int): The layer id of this MoE block.
     """
 
     def __init__(
@@ -1180,7 +1219,14 @@ class ParallelMoeBlock(nn.Module):
 
         self.checkpoint_prefix = checkpoint_prefix
         self.layer_id = layer_id
+
+        from chitu.backend import Backend
+
+        if self.layer_id is not None:
+            Backend.register_moe_layer_experts(self.layer_id, self.experts)
+        self.layer_id = layer_id
         self.experts_stats = torch.zeros(self.experts.n_routed_experts, device="cuda")
+        self.is_dynamic = get_global_args().infer.moe_lb_trigger > 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1196,10 +1242,24 @@ class ParallelMoeBlock(nn.Module):
         x = x.view(-1, x.shape[-1])
 
         weights, indices = self.gate(x)
-        indices = (
-            self.expert_mapping[indices] if self.expert_mapping is not None else indices
-        )
-        routed_x = IndexedBatchedRoutedActivation(x, indices)
+        rerouted_indices = None
+
+        if self.is_dynamic:
+            planner = get_moe_load_planner()
+            if planner is not None:
+                global_slot_idx = planner.route_expert_ids(self.layer_id, indices)
+                rerouted_indices = global_slot_idx.to(
+                    dtype=indices.dtype, device=indices.device
+                ).contiguous()
+        elif self.expert_mapping is not None:
+            rerouted_indices = self.expert_mapping[indices].contiguous()
+        else:
+            rerouted_indices = None
+        if rerouted_indices is None:
+            rerouted_indices = indices
+
+        routed_x = IndexedBatchedRoutedActivation(x, rerouted_indices)
+
         shared_y = None
         x_in_use_simultenously = False
         if self.shared_experts is not None:
@@ -1224,6 +1284,7 @@ class ParallelMoeBlock(nn.Module):
                 may_fuse_quant_kwargs=get_quant_kwargs_from_checkpoint_prefix(
                     f"{self.checkpoint_prefix}.experts"
                 ),
+                layer_id=self.layer_id,
             )
             x_in_use_simultenously = x_in_use_simultenously and (
                 routed_x_old is routed_x

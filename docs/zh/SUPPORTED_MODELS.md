@@ -138,6 +138,8 @@
   用法: 启动赤兔时追加 `models=Qwen3-235B-A22B` 启动参数
 - Qwen3-235B-A22B-ascend-int8
   用法: 启动赤兔时追加 `models=Qwen3-235B-A22B-ascend-int8` 启动参数
+- Qwen3-235B-A22B-fp4
+  用法: 启动赤兔时追加 `models=Qwen3-235B-A22B-fp4` 启动参数
 - Qwen3-235B-A22B-fp8
   用法: 启动赤兔时追加 `models=Qwen3-235B-A22B-fp8` 启动参数
 - Qwen3-30B-A3B
@@ -186,6 +188,8 @@
   用法: 启动赤兔时追加 `models=Qwen3-Coder-480B-A35B-Instruct-fp8` 启动参数
 - Qwen3-Next-80B-A3B-Instruct
   用法: 启动赤兔时追加 `models=Qwen3-Next-80B-A3B-Instruct` 启动参数
+- Qwen3-Next-80B-A3B-Instruct-FP8
+  用法: 启动赤兔时追加 `models=Qwen3-Next-80B-A3B-Instruct-FP8` 启动参数
 - Seed-OSS-36B-Instruct
   用法: 启动赤兔时追加 `models=Seed-OSS-36B-Instruct` 启动参数
 - glm-4-9b-chat

@@ -288,30 +288,60 @@ torchrun --nnodes 2 --nproc_per_node 8 test/single_req_test.py request.max_new_t
 ./script/srun_multi_node.sh 2 8 --pty -- test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
 ```
 
-### 使用 slurm 在多个节点上的 Apptainer 容器内运行
+### 使用 slurm 在多个节点上的 Docker/Apptainer 容器内运行
 
-可以使用以下脚本命令运行：
+可以使用以下脚本命令运行 Docker：
 
 ```bash
-./script/srun_apptainer_multi_node.sh <num_nodes> <num_gpus_per_node> [[additional srun args]... --] [extra apptainer args]... <sif_file> torchrun [your command after torchrun]...
+./script/srun_docker_run_multi_node.sh <num_nodes> <num_gpus_per_node> [[additional srun args]... --] [extra docker args]... <docker_image> torchrun [your command after torchrun]...
 ```
 
-示例 1（使用默认 srun 参数）：
+或 Apptainer：
 
 ```bash
-./script/srun_apptainer_multi_node.sh 2 8 -B /path/to/models:/path/to/models /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+./script/srun_apptainer_run_multi_node.sh <num_nodes> <num_gpus_per_node> [[additional srun args]... --] [extra apptainer args]... <sif_file> torchrun [your command after torchrun]...
 ```
 
-示例 2（与 node 0 交互）：
+**示例 1（使用默认 srun 参数）：**
+
+Docker:
 
 ```bash
-./script/srun_apptainer_multi_node.sh 2 8 --pty -- -B /path/to/models:/path/to/models /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+./script/srun_docker_run_multi_node.sh 2 8 --rm -v /path/to/models:/path/to/models your_image:your_version torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
 ```
 
-示例 3（将 chitu 代码挂载到容器中）：
+Apptainer:
 
 ```bash
-./script/srun_apptainer_multi_node.sh 2 8 -B .:/workspace/chitu -B /path/to/models:/path/to/models --env PYTHONPATH=/workspace/chitu /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+./script/srun_apptainer_run_multi_node.sh 2 8 -B /path/to/models:/path/to/models /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+```
+
+**示例 2（与 node 0 交互）：**
+
+Docker:
+
+```bash
+./script/srun_docker_run_multi_node.sh 2 8 --pty -- -it --rm -v /path/to/models:/path/to/models your_image:your_version torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+```
+
+Apptainer:
+
+```bash
+./script/srun_apptainer_run_multi_node.sh 2 8 --pty -- -B /path/to/models:/path/to/models /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+```
+
+**示例 3（将 chitu 代码挂载到容器中）：**
+
+Docker:
+
+```bash
+./script/srun_docker_run_multi_node.sh 2 8 --rm -v .:/workspace/chitu -v /path/to/models:/path/to/models -e PYTHONPATH=/workspace/chitu your_image:your_version torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
+```
+
+Apptainer:
+
+```bash
+./script/srun_apptainer_run_multi_node.sh 2 8 -B .:/workspace/chitu -B /path/to/models:/path/to/models --env PYTHONPATH=/workspace/chitu /path/to/image.sif torchrun test/single_req_test.py models=Qwen3-235B-A22B models.ckpt_dir=/path/to/Qwen3-235B-A22B infer.dp_size=4 infer.tp_size=4 infer.ep_size=16
 ```
 
 ### 基于 SSH 连接的多节点运行
@@ -333,13 +363,13 @@ torchrun --nnodes 2 --nproc_per_node 8 test/single_req_test.py request.max_new_t
 首先确保各节点直接可以相互无密码 ssh 访问，然后在各个节点上启动同名的容器，最后执行以下脚本命令：
 
 ```bash
-./script/ssh_docker_multi_node.sh <docker-container-name> <pwd-in-container> <comma-separated-hosts> <num_gpus_per_node> [your command after torchrun]...
+./script/ssh_docker_exec_multi_node.sh <docker-container-name> <pwd-in-container> <comma-separated-hosts> <num_gpus_per_node> [your command after torchrun]...
 ```
 
 示例：
 
 ```bash
-./script/ssh_docker_multi_node.sh my_container /workspace "host1,host2" 2 test/single_req_test.py models=<model-name> models.ckpt_dir=<path/to/checkpoint> request.max_new_tokens=64 infer.cache_type=paged infer.tp_size=2
+./script/ssh_docker_exec_multi_node.sh my_container /workspace "host1,host2" 2 test/single_req_test.py models=<model-name> models.ckpt_dir=<path/to/checkpoint> request.max_new_tokens=64 infer.cache_type=paged infer.tp_size=2
 ```
 
 ### 固定输入输出长度用于性能测试
@@ -544,3 +574,22 @@ python benchmarks/benchmark_serving.py \
 - 即使回答已经结束，每个请求的输出长度也会被固定为你所设置的值（即推理引擎会无视表示序列结束的 EOS token）。
 - 会使用默认的采样参数进行推理。默认的采样参数可在 `chitu/task.py` 中的 `class UserRequest` 中查看。
 - 不在请求间进行缓存。
+
+## 环境变量
+
+安装时：
+
+| 名称                       | 可选值                       | 描述                                                   |
+| -------------------------- | ---------------------------- | ------------------------------------------------------ |
+| `CHITU_WITH_CYTHON`        | `0`, `1`                     | 利用 Cython 编译 Python 源码。                         |
+| `CHITU_ASCEND_BUILD`       | `0`, `1`                     | 面向昇腾构建。                                         |
+| `CHITU_HYGON_BUILD`        | `0`, `1`                     | 面向海光构建。                                         |
+| `CHITU_MUXI_BUILD`         | `0`, `1`                     | 面向沐曦构建。                                         |
+| `CHITU_SETUP_JOBS`         | 整数                         | 并行编译的进程数。                                     |
+
+运行时：
+
+| 名称                       | 可选值                       | 描述                                                   |
+| -------------------------- | ---------------------------- | ------------------------------------------------------ |
+| `CHITU_LOGGING_LEVEL`      | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` | 日志级别。                          |
+| `CHITU_DEBUG`              | `0`, `1`                     | 调试模式。当前仅用于启用一些计时器。                   |

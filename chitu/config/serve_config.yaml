@@ -44,6 +44,7 @@ infer:
     prefill_token_dispatcher: auto # one of: auto, tp, allgather, deepep-nl
     decode_token_dispatcher: auto # one of: auto, tp, allgather, deepep-ll
   mtp_size: 1 # if mtp_size==1, the mtp function is turned off; the mtp function will only be enabled when mtp_size>1.
+  schedule_overlap: auto # True, False or auto
   diffusion:
     denoising_steps: 50
     guidance_scale: 7.5
@@ -112,6 +113,10 @@ dp_config:
       - host: 0.0.0.0
         port: 29630
         scheduling_strategy: "immediate"
+metrics:
+  port: 9097
+  log_interval: 10.0
+  collect_interval: 20.0
 debug:
   skip_model_load: False
   force_moe_balance: False

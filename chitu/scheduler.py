@@ -17,6 +17,7 @@ from chitu.task import (
     PackedTasksBase,
     SerializedPackedTasksPayloadType,
 )
+from chitu.metrics.prometheus_collector import PrometheusMetricsCollector
 
 logger = getLogger(__name__)
 
@@ -394,7 +395,7 @@ class Scheduler:
             num_tasks=1,
             task_ids=[task_id],
             req_ids=[task.req.request_id],
-            task_type=TaskType.Decode,
+            task_type=TaskType.Special,
             payload_type=SerializedPackedTasksPayloadType.EndTask,
         )
         Backend.executor.step(tasks)
@@ -407,6 +408,9 @@ class Scheduler:
                 "total_blocks": Backend.cache_manager.get_num_blocks(),
             },
         )
+
+        # Update metrics: record task eviction
+        PrometheusMetricsCollector.inc_task_eviction()
 
         # Restore the task's status to before prefill
         task.task_type = TaskType.Prefill

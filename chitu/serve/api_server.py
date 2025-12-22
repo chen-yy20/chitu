@@ -193,8 +193,11 @@ async def create_chat_completion(
                 return JSONResponse(response_dict)
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
-    except ValueError:
-        del req, response
+    except ValueError as e:
+        if "req" in locals():
+            del req
+        if "response" in locals():
+            del response
         raise HTTPException(
             status_code=400, detail="prompt length is greater than max_seqs_len"
         )
@@ -716,7 +719,7 @@ def init_dp_router(args):
     from chitu.chitu_main import init_logger
     from chitu.global_vars import set_global_args
 
-    init_logger(logging.INFO)
+    init_logger()
     set_global_args(args)
 
     # Router only needs basic args, no Backend initialization required

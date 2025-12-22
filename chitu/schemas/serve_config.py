@@ -46,9 +46,11 @@ class InferConfig:
     bind_thread_to_cpu: str = MISSING
     memory_utilization: float = MISSING
     prefill_chunk_size: Union[int, str, None] = MISSING
+    schedule_overlap: bool | str = MISSING
     experts_stats_path: Optional[str] = None
     num_experts_slots: Optional[int] = None
-    has_schedule_overlap: bool = False
+    moe_lb_trigger: int = -1
+    moe_lb_threshold: float = 3.0
 
     @dataclass
     class MoEConfig:
@@ -166,6 +168,15 @@ class DpConfig:
 
 
 @dataclass
+class MetricsConfig:
+    """Metrics collection configuration"""
+
+    port: int = 9097
+    log_interval: float = 10.0
+    collect_interval: float = 1.0
+
+
+@dataclass
 class DebugConfig:
     skip_model_load: bool = MISSING
     force_moe_balance: bool = MISSING
@@ -268,6 +279,7 @@ class ServeConfig:
     request: RequestConfig = field(default_factory=RequestConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     dp_config: DpConfig = field(default_factory=DpConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
     quant: Optional[str] = MISSING
     dtype: Optional[str] = MISSING  # Legacy parameter. To be removed in the future.

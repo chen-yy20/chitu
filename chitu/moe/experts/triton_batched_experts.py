@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 
 from chitu.ops import silu_and_mul
+from chitu.ops.triton_ops.activation import silu_and_mul_triton_with_expert_mask
 from chitu.moe.batched_routed_activation import PerExpertDenseBatchedRoutedActivation
 
 
@@ -516,12 +517,12 @@ def triton_batched_experts(
 
     E, M, _ = hidden_states.activation_per_expert.shape
     N = w1.shape[1]
-    intermediate_cache1 = torch.zeros(
+    intermediate_cache1 = torch.empty(
         (E, M, N),
         dtype=hidden_states.activation_per_expert.dtype,
         device=hidden_states.activation_per_expert.device,
     )
-    output = torch.zeros_like(hidden_states.activation_per_expert)
+    output = torch.empty_like(hidden_states.activation_per_expert)
     config = {
         "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": 64,
@@ -543,11 +544,11 @@ def triton_batched_experts(
         per_act_token_quant=False,
         block_shape=None,
     )
-    intermediate_cache2 = (
-        silu_and_mul(intermediate_cache1.view(-1, N), impl="triton")
-        .evaluate()
-        .view(E, M, N // 2)
-    )
+    intermediate_cache2 = silu_and_mul(
+        intermediate_cache1,
+        expert_n_tokens=hidden_states.n_tokens_per_expert,
+        impl="triton",
+    ).evaluate()
 
     invoke_moe_batched_triton_kernel(
         A=intermediate_cache2,
