@@ -14,7 +14,6 @@ from collections import deque
 from chitu.task import TaskLoad
 from chitu.diffusion.backend import DiffusionBackend
 
-
 logger = getLogger(__name__)
 
 
@@ -55,8 +54,9 @@ class DiffusionParams:
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     sample_shift: float = 5.0,
-    clip_skip: int = 1
-    strength: float = 1.0  # for img2img
+    # clip_skip: int = 1
+    # strength: float = 1.0  # for img2img
+    save_dir: Optional[str] = "./output"  # 输出保存路径
 
 
 class DiffusionUserRequest:
@@ -111,8 +111,11 @@ class DiffusionTaskBuffer:
     # Text encode buffers
     text_embeddings: Optional[torch.Tensor] = field(default=None)
     negative_embeddings: Optional[torch.Tensor] = field(default=None)
+    seq_len: Optional[int] = field(default=None)
     
     # Denoise buffers
+    seed_g: Optional[torch.Generator] = field(default=None)
+    sampler: Optional[Any] = field(default=None)
     latents: Optional[torch.Tensor] = field(default=None)
     timesteps: Optional[List[int]] = field(default=None)
     current_step: int = field(default=0)
@@ -140,6 +143,8 @@ class DiffusionTask:
         self.req = req
         self.priority = priority
         self.status = DiffusionTaskStatus.Pending
+        self.num_inference_steps = req.params.num_inference_steps
+        self.do_cfg = req.params.guidance_scale > 0
         
         # 时间戳
         self.created_time = time.perf_counter_ns()
@@ -240,12 +245,11 @@ class DiffusionTask:
         """转换到下一个处理阶段并更新缓冲区
         
         Args:
-            tokens: 当前阶段的输出tokens
+            tokens: 当前阶段的输出tokens/latents
         
         Returns:
-            bool: 是否成功转换到下一阶段（False表示已完成所有阶段）
+            bool: 是否需要继续调度（False表示已完成所有阶段）
         """
-        do_cfg = self.req.params.guidance_scale > 0
         has_img = self.req.init_image is not None
         
         logger.info(f"[Task] current stage: {self.task_type}")
@@ -253,39 +257,81 @@ class DiffusionTask:
         # 处理Text Encode阶段
         if self.task_type == DiffusionTaskType.TextEncode:
             if self.buffer.text_embeddings is None:
-                # 首次text encode
+                # 首次text encode (正向prompt)
                 self.buffer.text_embeddings = tokens
-                if do_cfg:
-                    # CFG模式需要第二次encode
+                if self.do_cfg:
+                    # CFG模式需要第二次encode negative prompt
                     return True
             else:
-                # 第二次text encode（仅CFG模式）或完成text encode
-                if do_cfg:
+                # 第二次text encode（仅CFG模式）
+                if self.do_cfg:
                     self.buffer.negative_embeddings = tokens
                 
-            # 确定下一阶段
+            # Text Encode完成，转换到下一阶段
             self.task_type = DiffusionTaskType.VAEEncode if has_img else DiffusionTaskType.Denoise
             self.status = DiffusionTaskStatus.Pending
+            
+            # 如果转换到Denoise阶段，初始化denoise相关参数
+            if self.task_type == DiffusionTaskType.Denoise:
+                self.buffer.current_step = 0
+                self.num_inference_steps = self.req.params.num_inference_steps
+                
             logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
             return True
         
-        # 处理其他阶段的转换
-        stage_transitions = {
-            DiffusionTaskType.VAEEncode: DiffusionTaskType.Denoise,
-            DiffusionTaskType.Denoise: DiffusionTaskType.VAEDecode,
-            DiffusionTaskType.VAEDecode: None  # 最终阶段
-        }
+        # 处理VAE Encode阶段
+        elif self.task_type == DiffusionTaskType.VAEEncode:
+            self.buffer.latents = tokens  # 保存编码后的latents
+            
+            # 转换到Denoise阶段
+            self.task_type = DiffusionTaskType.Denoise
+            self.status = DiffusionTaskStatus.Pending
+            
+            # 初始化denoise相关参数            
+            logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
+            return True
         
-        next_stage = stage_transitions.get(self.task_type)
-        if next_stage is None:
+        # 处理Denoise阶段（关键：需要多次执行）
+        elif self.task_type == DiffusionTaskType.Denoise:
+            # 更新当前去噪后的latents
+            self.buffer.latents = tokens
+            self.buffer.current_step += 1
+            
+            logger.debug(f"Task {self.task_id} denoise step {self.buffer.current_step}/{self.num_inference_steps}")
+            
+            # 检查是否完成所有denoise步骤
+            if self.buffer.current_step >= self.num_inference_steps:
+                # 所有denoise步骤完成，转换到VAE Decode
+                self.task_type = DiffusionTaskType.VAEDecode
+                self.status = DiffusionTaskStatus.Pending
+                logger.debug(f"Task {self.task_id} completed denoising, transitioned to {self.task_type}")
+                return True
+            else:
+                # 还需要继续denoise，保持当前阶段但状态改为Pending等待下次调度
+                self.status = DiffusionTaskStatus.Pending
+                logger.debug(f"Task {self.task_id} continuing denoise step {self.buffer.current_step}/{self.num_inference_steps}")
+                return True
+        
+        # 处理VAE Decode阶段（最终阶段）
+        elif self.task_type == DiffusionTaskType.VAEDecode:
+            self.buffer.generated_image = tokens  # 保存最终生成的图像
             self.req.finish_reason = "completed"
             logger.debug(f"Task {self.task_id} completed all stages")
+            self.status = DiffusionTaskStatus.Completed
+            return False  # 完成所有阶段，不需要继续调度
+        
+        # 未知阶段
+        else:
+            logger.error(f"Unknown task type: {self.task_type}")
+            self.req.finish_reason = "error"
+            self.status = DiffusionTaskStatus.Failed
             return False
-            
-        self.task_type = next_stage
-        self.status = DiffusionTaskStatus.Pending
-        logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
-        return True
+
+    def get_denoise_progress(self) -> float:
+        """获取去噪进度百分比"""
+        if self.task_type != DiffusionTaskType.Denoise:
+            return 0.0
+        return self.buffer.current_step / max(self.num_inference_steps, 1)
 
     def get_pipeline_progress(self) -> float:
         """获取整个流水线的进度百分比"""
@@ -304,8 +350,12 @@ class DiffusionTask:
             if self.status == DiffusionTaskStatus.Completed:
                 base_progress = stage_weights[DiffusionTaskType.TextEncode]
             elif self.status == DiffusionTaskStatus.Running:
-                base_progress = stage_weights[DiffusionTaskType.TextEncode] * 0.5
-                
+                # Text encode阶段内部进度
+                if self.do_cfg and self.buffer.text_embeddings is not None:
+                    base_progress = stage_weights[DiffusionTaskType.TextEncode] * 0.75
+                else:
+                    base_progress = stage_weights[DiffusionTaskType.TextEncode] * 0.5
+                    
         elif self.task_type == DiffusionTaskType.VAEEncode:
             base_progress = stage_weights[DiffusionTaskType.TextEncode]
             if self.status == DiffusionTaskStatus.Completed:

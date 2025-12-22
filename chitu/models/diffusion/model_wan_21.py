@@ -2,7 +2,7 @@
 import math
 from logging import getLogger
 import torch
-import torch.cuda.amp as amp
+import torch.amp as amp
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
@@ -10,10 +10,7 @@ from diffusers.models.modeling_utils import ModelMixin
 from chitu.models.registry import ModelType, register_model, log_init_params
 from chitu.attn_backend import AttnBackend
 from chitu.diffusion.model_default import WanModelDefaults
-
-# TODO: chitu attention backend support
-def flash_attention():
-    pass
+from chitu.diffusion.modules.attention.wan_attention import flash_attention
 
 logger = getLogger(__name__)
 
@@ -36,7 +33,7 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@amp.autocast(enabled=False)
+@amp.autocast(device_type="cuda", enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
     freqs = torch.outer(
@@ -47,7 +44,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 
-@amp.autocast(enabled=False)
+@amp.autocast(device_type="cuda", enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
 
@@ -302,7 +299,7 @@ class WanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         assert e.dtype == torch.float32
-        with amp.autocast(dtype=torch.float32):
+        with amp.autocast(device_type="cuda", dtype=torch.float32):
             e = (self.modulation + e).chunk(6, dim=1)
         assert e[0].dtype == torch.float32
 
@@ -310,14 +307,14 @@ class WanAttentionBlock(nn.Module):
         y = self.self_attn(
             self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes,
             freqs)
-        with amp.autocast(dtype=torch.float32):
+        with amp.autocast(device_type="cuda", dtype=torch.float32):
             x = x + y * e[2]
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
-            with amp.autocast(dtype=torch.float32):
+            with amp.autocast(device_type="cuda", dtype=torch.float32):
                 x = x + y * e[5]
             return x
 
@@ -349,7 +346,7 @@ class Head(nn.Module):
             e(Tensor): Shape [B, C]
         """
         assert e.dtype == torch.float32
-        with amp.autocast(dtype=torch.float32):
+        with amp.autocast(device_type="cuda", dtype=torch.float32):
             e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
             x = (self.head(self.norm(x) * (1 + e[1]) + e[0]))
         return x
@@ -452,14 +449,23 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
             rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        ], dim=1)
 
         if model_type == 'i2v' or model_type == 'flf2v':
             self.img_emb = MLPProj(1280, self.dim, flf_pos_emb=model_type == 'flf2v')
 
         # initialize weights
         self.init_weights()
+
+
+    def _single_input_preprocess(self, x, t, context, y):
+        x = [x]
+        t = t.unsqueeze(0)
+        context = [context]
+        if y is not None:
+            y = [y]
+        return x, t, context, y
+    
 
     def forward(
         self,
@@ -491,6 +497,12 @@ class WanModel(ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
+
+        single_input = False
+        if not isinstance(x, list):
+            single_input = True
+            x, t, context, y = self._single_input_preprocess(x, t, context, y)
+
         if self.model_type == 'i2v' or self.model_type == 'flf2v':
             assert clip_fea is not None and y is not None
         # params
@@ -514,7 +526,7 @@ class WanModel(ModelMixin, ConfigMixin):
         ])
 
         # time embeddings
-        with amp.autocast(dtype=torch.float32):
+        with amp.autocast(device_type="cuda", dtype=torch.float32):
             e = self.time_embedding(
                 sinusoidal_embedding_1d(self.freq_dim, t).float())
             e0 = self.time_projection(e).unflatten(1, (6, self.dim))
@@ -550,7 +562,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # unpatchify
         x = self.unpatchify(x, grid_sizes)
-        return [u.float() for u in x]
+
+        return x[0].to(torch.float32)
+
+        # return [u.float() for u in x]
 
     def unpatchify(self, x, grid_sizes):
         r"""

@@ -711,12 +711,15 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         self.model_outputs[-1] = model_output_convert
         self.timestep_list[-1] = timestep  # pyright: ignore
 
+
         if self.config.lower_order_final:
             this_order = min(self.config.solver_order,
                              len(self.timesteps) -
                              self.step_index)  # pyright: ignore
         else:
             this_order = self.config.solver_order
+        
+        print(f"debug: {this_order=} step_index={self.step_index}, solver_order={self.config.solver_order}, lower_order_nums={self.lower_order_nums}", flush=True)
 
         self.this_order = min(this_order,
                               self.lower_order_nums + 1)  # warmup for multistep

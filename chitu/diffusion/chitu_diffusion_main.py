@@ -214,15 +214,17 @@ def chitu_run_normal():
     logger.info(f"[run] scheduled task_ids={task_ids}")
     
     # 再基于task_ids给出打包
-    if task_ids:
+    if len(task_ids) > 0:
         # compute
         logger.debug(f"Processing {task_ids}")
         task = DiffusionTaskPool.pool[task_ids[0]]
         out = Backend.generator.step(task)
-        logger.debug(f"[run] executor.step returned. {out.shape=}")
+        if out is not None:
+            logger.debug(f"[run] executor.step returned. {out.shape=}")
         # postprocess        
     else:
         logger.debug("No tasks scheduled in this round.")
+        exit() # TODO: 空转，等待后续请求
 
 
 @torch.inference_mode()

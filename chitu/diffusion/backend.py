@@ -358,47 +358,6 @@ class DiffusionBackend:
             return attn_backend_type()
 
     @staticmethod
-    def _move_one_module_to_device(
-        m: torch.nn.Module, non_blocking: bool = True, ignore_not_loaded: bool = False
-    ):
-        # NOTE: m._parameters contains parameters in this module (non-recursive),
-        # while m.parameters() returns all parameters in this module and its submodules
-        # (recursive).
-        for key in m._parameters:
-            param = m._parameters[key]
-            if param is not None:
-                if not isinstance(param, CPUParameter):
-                    if param.device == torch.device("meta"):
-                        if not ignore_not_loaded:
-                            assert False, f"Unexpected unloaded parameter {key}"
-                        else:
-                            continue
-                    if is_muxi():
-                        # Work around a muxi bug that convert from NHWC to NCHW for whatever
-                        # 4-D tensor even its not a convolution weight.
-                        param.data = param.data.cuda(
-                            non_blocking=non_blocking
-                        ).contiguous()
-                    else:
-                        param.data = param.data.cuda(non_blocking=non_blocking)
-        for key in m._buffers:
-            buffer = m._buffers[key]
-            if buffer is not None:
-                if buffer.device == torch.device("meta"):
-                    # Buffers are expected possibly not to be loaded, so buffer.device may be "meta"
-                    m._buffers[key] = torch.empty(
-                        buffer.shape, dtype=buffer.dtype, device="cuda"
-                    )
-                elif is_muxi():
-                    # Work around a muxi bug that convert from NHWC to NCHW for whatever
-                    # 4-D tensor even its not a convolution weight.
-                    m._buffers[key] = buffer.cuda(
-                        non_blocking=non_blocking
-                    ).contiguous()
-                else:
-                    m._buffers[key] = buffer.cuda(non_blocking=non_blocking)
-
-    @staticmethod
     def _build_and_setup_model(args, attn_backend):
         """
         Build model architecture, load checkpoints, and apply quantization.
@@ -415,7 +374,7 @@ class DiffusionBackend:
 
         if not args.debug.skip_model_load:
             # Build the model. Don't allocate memory yet.
-            with torch.device("meta"):
+            with torch.device("cuda"): # FIXME: support meta device
                 model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
 
             # Load model parameters
@@ -426,7 +385,6 @@ class DiffusionBackend:
             model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
 
         model.eval().requires_grad_(False)
-
         DiffusionBackend.model = model
         DiffusionBackend.args = args
 

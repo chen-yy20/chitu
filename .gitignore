@@ -100,3 +100,7 @@ log/*
 
 # macOS
 .DS_Store
+
+# Diffusion
+*.mp4
+output/*
