@@ -20,29 +20,22 @@ class DiffusionScheduler:
     @staticmethod
     def build(infer_args):
         logger.info(f"Building diffusion scheduler: {infer_args=}")
-        do_cfg = infer_args.guidance_scale > 0
-        return DiffusionScheduler(do_cfg, scheduler_type="eager")
+        return DiffusionScheduler()
     
-    def __init__(
-        self,
-        do_cfg: bool = True, # Classifier-free Guidance
-        scheduler_type: str = "eager",
-    ):
-        self.scheduler_type = scheduler_type
-        self.do_cfg = do_cfg
+    def __init__(self):
         self.scheduling_ts = 0
-        logger.info(f"Initialized DiffusionScheduler with type: {scheduler_type}")
+        logger.info(f"Initialized FIFO DiffusionScheduler.")
 
     def schedule(self) -> List[str]:
         """
-        调度任务，采用FIFO方式，每次只调度一个任务
+        First in first out, naive scheduling
         
         Returns:
-            List[str]: 被调度的任务ID列表，最多包含一个元素
+            List[str]: contains only one task_id
         """
         # 检查任务池是否为空
         if DiffusionTaskPool.is_empty():
-            logger.debug("DiffusionTaskPool is empty, returning empty task list.")
+            logger.info("DiffusionTaskPool is empty, returning empty task list.")
             return []
         
         # 更新调度时间戳
@@ -56,7 +49,7 @@ class DiffusionScheduler:
         
         # 如果没有可调度的任务
         if not available_task_ids:
-            logger.debug("No pending tasks available for scheduling.")
+            logger.info("No pending tasks available for scheduling.")
             return []
         
         # FIFO调度：选择队列中的第一个任务

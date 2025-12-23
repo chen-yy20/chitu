@@ -10,10 +10,13 @@ from chitu.diffusion.chitu_diffusion_main import (
     chitu_init,
     chitu_generate,
     warmup_diffusion_engine,
+    chitu_start,
+    chitu_terminate,
+    chitu_is_terminated
 )
 
 # from chitu.task import UserRequest, TaskPool, Task
-from chitu.diffusion.task import DiffusionUserRequest, DiffusionTask, DiffusionTaskPool, DiffusionParams
+from chitu.diffusion.task import DiffusionUserRequest, DiffusionTask, DiffusionTaskPool, DiffusionUserParams
 
 from chitu.global_vars import get_timers
 from chitu.schemas import ServeConfig
@@ -22,8 +25,7 @@ from chitu.utils import get_config_dir_path, gen_req_id
 logger = getLogger(__name__)
 
 # Default wan params
-# 需要注意区分：系统参数 / 模型参数 config / 用户参数 params
-default_diffusion_params = DiffusionParams(
+default_diffusion_params = DiffusionUserParams(
     seed=42,
     frame_num=81,
     size=(832,480),
@@ -57,41 +59,39 @@ def gen_reqs(num_reqs, max_new_tokens, frequency_penalty, is_vl=False):
 def run_normal(args, timers):
     rank = torch.distributed.get_rank()
     warmup_diffusion_engine(args)
-    logger.info("chitu warmup engine.")
 
-    # 重复执行
     for i in range(1):
-        reqs = gen_reqs(
-            # num_reqs=args.infer.max_reqs,
-            num_reqs=len(msgs),
-            max_new_tokens=args.request.max_new_tokens,
-            frequency_penalty=args.request.frequency_penalty,
-            is_vl=hasattr(args.models, "vision_config"),
-        )
-        logger.info(f'{reqs=}')
-        
-        # 已有的request加入
-        for req in reqs:
-            DiffusionTaskPool.add(DiffusionTask(req.request_id, req))
+        chitu_start()
+        if rank == 0:
+            reqs = gen_reqs(
+                num_reqs=len(msgs), # args.infer.max_reqs
+                max_new_tokens=args.request.max_new_tokens,
+                frequency_penalty=args.request.frequency_penalty,
+                is_vl=hasattr(args.models, "vision_config"),
+            )
+            logger.info(f'{reqs=}')
+            for req in reqs:
+                DiffusionTaskPool.add(DiffusionTask(req.request_id, req))
             
         logger.info(f"------ batch {i} ------")
         t_start = time.time()
-        
         timers("overall").start()
-        tokens = 0
-        while len(DiffusionTaskPool.pool) > 0:
+
+        while not chitu_is_terminated():
             chitu_generate()
-
-        print("GPU memory used : ", torch.cuda.memory_allocated())
-        timers("overall").stop()
-        t_end = time.time()
-        logger.info(f"Tokens generate : {tokens}")
-        logger.info(f"Time cost {t_end - t_start}")
-
-        for i, req in enumerate(reqs):
-            logger.info(f"Response in rank {rank}: reqs[{i}].output={req.output}")
+            if rank == 0 and DiffusionTaskPool.all_finished():
+                break
+            
+        if rank == 0:
+            print("GPU memory used : ", torch.cuda.memory_allocated())
+            timers("overall").stop()
+            t_end = time.time()
+            logger.info(f"Time cost {t_end - t_start}")
 
         timers.log()
+        
+    chitu_terminate()
+
 
 @hydra.main(
     version_base=None,

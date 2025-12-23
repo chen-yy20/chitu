@@ -14,7 +14,8 @@ from logging import getLogger
 from chitu.global_vars import get_global_args, get_slot_handle, get_timers
 from chitu.diffusion.backend import DiffusionBackend
 from chitu.backend import BackendState
-from chitu.diffusion.task import DiffusionTask, DiffusionTaskType
+from chitu.task import SerializedPackedTasksPayloadType
+from chitu.diffusion.task import DiffusionTask, DiffusionTaskType, DiffusionTaskPool, DiffusionTaskStatus
 from chitu.executor import TasksDispatcher
 from chitu.distributed.parallel_state import (
     get_cfg_group,
@@ -33,6 +34,17 @@ from chitu.diffusion.utils.wan_utils import cache_video
 
 logger = getLogger(__name__)
 
+class CfgDispatcher(TasksDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.cfg_group = get_cfg_group()
+        self.rank = self.cfg_group.global_rank
+        self.local_rank = self.cfg_group.local_rank
+
+        self.cfg_main_rank = self.cfg_group.rank_list[0]
+        self.is_main_rank = self.cfg_group.is_first_rank
+
+        pass
 
 class SequenceDispatcher(TasksDispatcher):
     pass # context parallelism support
@@ -54,6 +66,13 @@ class Generator:
         # 调度器会给generator task，翻译成kernel -> 运行 -> 正确放置输出 -> 回收对应内存
         
         task_type = task.task_type if task is not None else None
+        # dispatcher
+        task.status = DiffusionTaskStatus.Running
+
+        if task_type == SerializedPackedTasksPayloadType.TerminateBackend:
+            DiffusionBackend.state = BackendState.Terminated
+            return None
+
 
         if task_type == DiffusionTaskType.TextEncode:
             out = self.text_encode_step(task)
@@ -67,7 +86,7 @@ class Generator:
             raise NotImplementedError    
         
         task.update_stage_and_buffer(out)
-        
+
         return out
         
             

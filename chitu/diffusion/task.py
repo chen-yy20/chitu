@@ -42,7 +42,7 @@ class DiffusionTaskStatus(Enum):
 
 
 @dataclass
-class DiffusionParams:
+class DiffusionUserParams:
     """Diffusion生成参数"""
     size: tuple[int, int] = (512, 512)
     frame_num: int = 81
@@ -71,7 +71,7 @@ class DiffusionUserRequest:
         latents = None,
         init_image: Optional[torch.Tensor] = None,  # for img2img
         mask: Optional[torch.Tensor] = None,        # for inpainting
-        params: Optional[DiffusionParams] = None,
+        params: Optional[DiffusionUserParams] = None,
     ):
         self.message = message
         self.request_id = request_id
@@ -80,7 +80,7 @@ class DiffusionUserRequest:
         self.latents = latents
         self.init_image = init_image
         self.mask = mask
-        self.params = params if params is not None else DiffusionParams()
+        self.params = params if params is not None else DiffusionUserParams()
         
         # 时间戳
         self.created_time = time.monotonic()
@@ -127,7 +127,6 @@ class DiffusionTaskBuffer:
 
 
 class DiffusionTask:
-    """Diffusion生成任务"""
     
     def __init__(
         self,
@@ -165,30 +164,6 @@ class DiffusionTask:
         
         # 错误信息
         self.error_message: Optional[str] = None
-
-    def start(self):
-        """开始执行任务"""
-        self.status = DiffusionTaskStatus.Running
-        self.start_time = time.monotonic()
-        if self.req.start_time is None:
-            self.req.start_time = self.start_time
-        logger.debug(f"Task {self.task_id} started")
-
-    def complete(self, output_data: Optional[torch.Tensor] = None):
-        """完成任务"""
-        self.status = DiffusionTaskStatus.Completed
-        self.end_time = time.monotonic()
-        if output_data is not None:
-            self.output_data = output_data
-        logger.debug(f"Task {self.task_id} completed")
-
-    def fail(self, error_message: str):
-        """任务失败"""
-        self.status = DiffusionTaskStatus.Failed
-        self.end_time = time.monotonic()
-        self.error_message = error_message
-        self.req.finish_reason = "error"
-        logger.error(f"Task {self.task_id} failed: {error_message}")
 
     def is_completed(self) -> bool:
         """检查任务是否完成"""
@@ -251,6 +226,10 @@ class DiffusionTask:
             bool: 是否需要继续调度（False表示已完成所有阶段）
         """
         has_img = self.req.init_image is not None
+        if self.status == DiffusionTaskStatus.Running:
+            self.status = DiffusionTaskStatus.Pending
+        else:
+            logger.warning(f"Task {self.task_id} - Status: {self.status}")
         
         logger.info(f"[Task] current stage: {self.task_type}")
         
@@ -269,7 +248,6 @@ class DiffusionTask:
                 
             # Text Encode完成，转换到下一阶段
             self.task_type = DiffusionTaskType.VAEEncode if has_img else DiffusionTaskType.Denoise
-            self.status = DiffusionTaskStatus.Pending
             
             # 如果转换到Denoise阶段，初始化denoise相关参数
             if self.task_type == DiffusionTaskType.Denoise:
@@ -285,7 +263,6 @@ class DiffusionTask:
             
             # 转换到Denoise阶段
             self.task_type = DiffusionTaskType.Denoise
-            self.status = DiffusionTaskStatus.Pending
             
             # 初始化denoise相关参数            
             logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
@@ -303,12 +280,10 @@ class DiffusionTask:
             if self.buffer.current_step >= self.num_inference_steps:
                 # 所有denoise步骤完成，转换到VAE Decode
                 self.task_type = DiffusionTaskType.VAEDecode
-                self.status = DiffusionTaskStatus.Pending
                 logger.debug(f"Task {self.task_id} completed denoising, transitioned to {self.task_type}")
                 return True
             else:
                 # 还需要继续denoise，保持当前阶段但状态改为Pending等待下次调度
-                self.status = DiffusionTaskStatus.Pending
                 logger.debug(f"Task {self.task_id} continuing denoise step {self.buffer.current_step}/{self.num_inference_steps}")
                 return True
         
@@ -326,68 +301,6 @@ class DiffusionTask:
             self.req.finish_reason = "error"
             self.status = DiffusionTaskStatus.Failed
             return False
-
-    def get_denoise_progress(self) -> float:
-        """获取去噪进度百分比"""
-        if self.task_type != DiffusionTaskType.Denoise:
-            return 0.0
-        return self.buffer.current_step / max(self.num_inference_steps, 1)
-
-    def get_pipeline_progress(self) -> float:
-        """获取整个流水线的进度百分比"""
-        # 定义各个阶段的权重
-        stage_weights = {
-            DiffusionTaskType.TextEncode: 0.1,    # 10%
-            DiffusionTaskType.VAEEncode: 0.1,     # 10% (仅img2img)
-            DiffusionTaskType.Denoise: 0.7,      # 70%
-            DiffusionTaskType.VAEDecode: 0.1,    # 10%
-        }
-        
-        base_progress = 0.0
-        
-        # 计算已完成阶段的进度
-        if self.task_type == DiffusionTaskType.TextEncode:
-            if self.status == DiffusionTaskStatus.Completed:
-                base_progress = stage_weights[DiffusionTaskType.TextEncode]
-            elif self.status == DiffusionTaskStatus.Running:
-                # Text encode阶段内部进度
-                if self.do_cfg and self.buffer.text_embeddings is not None:
-                    base_progress = stage_weights[DiffusionTaskType.TextEncode] * 0.75
-                else:
-                    base_progress = stage_weights[DiffusionTaskType.TextEncode] * 0.5
-                    
-        elif self.task_type == DiffusionTaskType.VAEEncode:
-            base_progress = stage_weights[DiffusionTaskType.TextEncode]
-            if self.status == DiffusionTaskStatus.Completed:
-                base_progress += stage_weights[DiffusionTaskType.VAEEncode]
-            elif self.status == DiffusionTaskStatus.Running:
-                base_progress += stage_weights[DiffusionTaskType.VAEEncode] * 0.5
-                
-        elif self.task_type == DiffusionTaskType.Denoise:
-            base_progress = stage_weights[DiffusionTaskType.TextEncode]
-            if self.req.init_image is not None:
-                base_progress += stage_weights[DiffusionTaskType.VAEEncode]
-            
-            # 去噪进度更细粒度
-            denoise_progress = self.get_denoise_progress()
-            base_progress += stage_weights[DiffusionTaskType.Denoise] * denoise_progress
-            
-        elif self.task_type == DiffusionTaskType.VAEDecode:
-            base_progress = stage_weights[DiffusionTaskType.TextEncode]
-            if self.req.init_image is not None:
-                base_progress += stage_weights[DiffusionTaskType.VAEEncode]
-            base_progress += stage_weights[DiffusionTaskType.Denoise]
-            
-            if self.status == DiffusionTaskStatus.Completed:
-                base_progress += stage_weights[DiffusionTaskType.VAEDecode]
-            elif self.status == DiffusionTaskStatus.Running:
-                base_progress += stage_weights[DiffusionTaskType.VAEDecode] * 0.5
-        
-        return min(base_progress, 1.0)
-
-    def is_final_stage(self) -> bool:
-        """检查是否为最后一个处理阶段"""
-        return self.task_type == DiffusionTaskType.VAEDecode
 
     def get_current_stage_name(self) -> str:
         """获取当前阶段的可读名称"""
@@ -427,8 +340,10 @@ class DiffusionTaskPool:
         return len(cls.pool) == 0
 
     @classmethod
-    def all_finished(cls):
-        return len(cls.pool) == 0
+    def all_finished(cls) -> bool:
+        if len(cls.pool) == 0:
+            return True
+        return all(task.is_completed() for task in cls.pool.values())
 
     @classmethod
     def add(cls, task: DiffusionTask):

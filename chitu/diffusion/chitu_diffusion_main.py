@@ -21,10 +21,10 @@ from chitu.global_vars import (
     set_quant_variables,
     set_backend_variables,
 )
-# from chitu.task import (
-#     PackedTasks,
-#     PackedTasksBase,
-#     SerializedPackedTasksPayloadType,
+from chitu.task import (
+    PackedTasksBase,
+    SerializedPackedTasksPayloadType,
+)
 #     BatchResult,
 #     Task,
 #     TaskPool,
@@ -206,15 +206,12 @@ def chitu_init(args, logging_level=None):
 
 
 @torch.inference_mode()
-def chitu_run_normal():
-    # 这个是rank0的执行，包括获取任务，preprocess，step，postprocess
-    # TODO: scheduler 和 generator.step的联动方式
-    # scheduler 给出本轮可以计算的task_ids
+def chitu_run_main_rank():
     task_ids = Backend.scheduler.schedule()
     logger.info(f"[run] scheduled task_ids={task_ids}")
     
     # 再基于task_ids给出打包
-    if len(task_ids) > 0:
+    if not DiffusionTaskPool.all_finished():
         # compute
         logger.debug(f"Processing {task_ids}")
         task = DiffusionTaskPool.pool[task_ids[0]]
@@ -224,19 +221,29 @@ def chitu_run_normal():
         # postprocess        
     else:
         logger.debug("No tasks scheduled in this round.")
-        exit() # TODO: 空转，等待后续请求
-
 
 @torch.inference_mode()
 def chitu_generate():
     rank = torch.distributed.get_rank()
     if rank != 0:
-        # 不需要传入任务，dispatcher会完成
         Backend.generator.step(None) 
         return
+    chitu_run_main_rank()
 
-    # 其他只需要step，rank0则需要preprocess+step+postprocess
-    chitu_run_normal()
+def chitu_start():
+    Backend.state = BackendState.Running
+
+def chitu_terminate():
+    if torch.distributed.get_rank() == 0:
+        Backend.state = BackendState.Terminated
+        terminated_task = PackedTasksBase(
+            num_tasks=0,
+            payload_type=SerializedPackedTasksPayloadType.TerminateBackend,
+        )
+        Backend.generator.step(terminated_task)
+
+def chitu_is_terminated():
+    return Backend.state == BackendState.Terminated
 
 # async def start_enhanced_scheduler_service(rank: int, dp_config, args):
 #     # only main rank of dp group start enhanced scheduler service
