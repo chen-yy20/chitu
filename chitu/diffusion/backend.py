@@ -80,7 +80,7 @@ class DiffusionBackend:
     curr_req_ids = None
     cache_type = ""
     # ---
-    use_gloo = True
+    use_gloo = False
     group_gloo = None
 
     # components

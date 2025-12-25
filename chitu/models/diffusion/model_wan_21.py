@@ -63,8 +63,7 @@ def rope_apply(x, grid_sizes, freqs):
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        ], dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
@@ -150,7 +149,6 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
-
         x = flash_attention(
             q=rope_apply(q, grid_sizes, freqs),
             k=rope_apply(k, grid_sizes, freqs),
@@ -467,6 +465,24 @@ class WanModel(ModelMixin, ConfigMixin):
         return x, t, context, y
     
 
+    def model_compute(self, tokens, **kwargs):
+        """
+        主计算负载：通过所有transformer blocks处理tokens
+        这是计算密集的核心部分，适合分布式处理
+        
+        Args:
+            tokens: 输入tokens
+            **kwargs: 从latents_to_tokens传递的所有必要参数
+            
+        Returns:
+            processed_tokens: 处理后的tokens
+        """
+        x = tokens
+        for block in self.blocks:
+            x = block(x, **kwargs)
+        return x
+        
+
     def forward(
         self,
         x,
@@ -476,35 +492,16 @@ class WanModel(ModelMixin, ConfigMixin):
         clip_fea=None,
         y=None,
     ):
-        r"""
-        Forward pass through the diffusion model
-
-        Args:
-            x (List[Tensor]):
-                List of input video tensors, each with shape [C_in, F, H, W]
-            t (Tensor):
-                Diffusion timesteps tensor of shape [B]
-            context (List[Tensor]):
-                List of text embeddings each with shape [L, C]
-            seq_len (`int`):
-                Maximum sequence length for positional encoding
-            clip_fea (Tensor, *optional*):
-                CLIP image features for image-to-video mode or first-last-frame-to-video mode
-            y (List[Tensor], *optional*):
-                Conditional video inputs for image-to-video mode, same shape as x
-
-        Returns:
-            List[Tensor]:
-                List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
-
-        single_input = False
+        完整的前向传播，现在拆分为三个阶段
+        """
+        # 阶段1: latents -> tokens
         if not isinstance(x, list):
-            single_input = True
             x, t, context, y = self._single_input_preprocess(x, t, context, y)
 
         if self.model_type == 'i2v' or self.model_type == 'flf2v':
             assert clip_fea is not None and y is not None
+        
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -513,16 +510,18 @@ class WanModel(ModelMixin, ConfigMixin):
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-        # embeddings
+        # embeddings - 将latents转换为patch embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
-        x = torch.cat([
+        
+        # 创建tokens - 这是将要传递给主计算的数据
+        tokens = torch.cat([
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
-                      dim=1) for u in x
+                    dim=1) for u in x
         ])
 
         # time embeddings
@@ -532,7 +531,7 @@ class WanModel(ModelMixin, ConfigMixin):
             e0 = self.time_projection(e).unflatten(1, (6, self.dim))
             assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        # context
+        # context processing
         context_lens = None
         context = self.text_embedding(
             torch.stack([
@@ -545,28 +544,27 @@ class WanModel(ModelMixin, ConfigMixin):
             context_clip = self.img_emb(clip_fea)  # bs x 257 (x2) x dim
             context = torch.concat([context_clip, context], dim=1)
 
-        # arguments
+        # 准备主计算所需的参数
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
             context=context,
-            context_lens=context_lens)
+            context_lens=context_lens
+        )
 
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        x = self.model_compute(tokens, **kwargs)
 
-        # head
+        # head processing
         x = self.head(x, e)
-
-        # unpatchify
+        
+        # unpatchify - 将tokens转换回空间表示
         x = self.unpatchify(x, grid_sizes)
-
-        return x[0].to(torch.float32)
-
+        
         # return [u.float() for u in x]
-
+        return x[0].to(torch.float32)
+    
     def unpatchify(self, x, grid_sizes):
         r"""
         Reconstruct video tensors from patch embeddings.

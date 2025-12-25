@@ -25,33 +25,31 @@ from chitu.utils import get_config_dir_path, gen_req_id
 logger = getLogger(__name__)
 
 # Default wan params
-default_diffusion_params = DiffusionUserParams(
+test_diffusion_request = DiffusionUserParams(
+    role="Alex",
+    prompt="A cat walking on grass.",
     seed=42,
     frame_num=81,
     size=(832,480),
     negative_prompt='色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走',
     sample_shift=5.0,
     guidance_scale=7.5,
-    num_inference_steps=50,
+    num_inference_steps=5,
     sample_solver='unipc',
 )
 
 
 # T2V prompts
 msgs = [
-    [{"role": "user", "content": "A cat walking on the grass."}],
-    # [{"role": "user", "content": "Two beautiful asian girls."}],
-    # [{"role": "user", "content": "一名宇航员在火星上拍照。"}],
+    test_diffusion_request,
 ]
 
 def gen_reqs(num_reqs, max_new_tokens, frequency_penalty, is_vl=False):
-    # TODO: 请求应该包含prompt，size等信息，同时对最大负载进行控制
     reqs: list[DiffusionUserRequest] = []
     for i in range(num_reqs):
         req = DiffusionUserRequest(
-            message = msgs[i % len(msgs)],
             request_id = f"{gen_req_id()}",
-            params=default_diffusion_params,
+            params=msgs[i]
         )
         reqs.append(req)
     return reqs
@@ -71,7 +69,7 @@ def run_normal(args, timers):
             )
             logger.info(f'{reqs=}')
             for req in reqs:
-                DiffusionTaskPool.add(DiffusionTask(req.request_id, req))
+                DiffusionTaskPool.add(DiffusionTask(task_id=req.request_id, req=req))
             
         logger.info(f"------ batch {i} ------")
         t_start = time.time()

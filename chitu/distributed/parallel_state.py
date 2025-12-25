@@ -413,6 +413,7 @@ def initialize_diffusion_parallel_groups(
     world_size = torch.distributed.get_world_size()
     
     # Initialize groups in order
+    initialize_world_group(rank, local_rank, world_size)
     initialize_cfg_group(cfg_size, rank, local_rank, world_size)
     initialize_cp_group(cp_size, cfg_size, rank, local_rank, world_size)
     # up_dividers = [1, 2, 4] # DiTango Support

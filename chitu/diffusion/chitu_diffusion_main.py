@@ -21,18 +21,6 @@ from chitu.global_vars import (
     set_quant_variables,
     set_backend_variables,
 )
-from chitu.task import (
-    PackedTasksBase,
-    SerializedPackedTasksPayloadType,
-)
-#     BatchResult,
-#     Task,
-#     TaskPool,
-#     TaskType,
-#     UserRequest,
-#     MockFixedLengthedUserRequest,
-#     DPTaskCollector,
-# )
 from chitu.utils import (
     gen_req_id,
     try_import_opt_dep,
@@ -44,7 +32,7 @@ from chitu.utils import ceil_div
 from chitu.distributed.parallel_state import get_dp_group
 from chitu.logging_utils import setup_chitu_logging
 
-from chitu.diffusion.task import DiffusionTask, DiffusionTaskPool
+from chitu.diffusion.task import DiffusionTask, DiffusionTaskPool, DiffusionTaskType
 from chitu.diffusion.backend import DiffusionBackend as Backend
 from chitu.diffusion.generator import Generator
 from chitu.diffusion.scheduler import DiffusionScheduler
@@ -134,11 +122,6 @@ def chitu_init(args, logging_level=None):
         )
         args.debug.skip_model_load = True
 
-    # No chunked prefill in diffusion models
-
-    # args.infer.has_schedule_overlap = (
-    #     args.infer.dp_size <= 1 and args.infer.pp_size <= 1
-    # )
 
     # Bind process to CPU NUMA
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -208,7 +191,7 @@ def chitu_init(args, logging_level=None):
 @torch.inference_mode()
 def chitu_run_main_rank():
     task_ids = Backend.scheduler.schedule()
-    logger.info(f"[run] scheduled task_ids={task_ids}")
+    logger.info(f"[Scheduler] scheduled task_ids={task_ids}")
     
     # 再基于task_ids给出打包
     if not DiffusionTaskPool.all_finished():
@@ -236,242 +219,8 @@ def chitu_start():
 def chitu_terminate():
     if torch.distributed.get_rank() == 0:
         Backend.state = BackendState.Terminated
-        terminated_task = PackedTasksBase(
-            num_tasks=0,
-            payload_type=SerializedPackedTasksPayloadType.TerminateBackend,
-        )
+        terminated_task = DiffusionTask.create_terminate_signal("0x")
         Backend.generator.step(terminated_task)
 
 def chitu_is_terminated():
     return Backend.state == BackendState.Terminated
-
-# async def start_enhanced_scheduler_service(rank: int, dp_config, args):
-#     # only main rank of dp group start enhanced scheduler service
-#     dp_id = args.dp_config.dp_id
-#     if rank != 0:
-#         logger.warning(
-#             f"[Enhanced Scheduler {dp_id}] only main rank of dp group start Enhanced Scheduler service"
-#         )
-#         return
-
-#     """Start Enhanced Scheduler service, listen to ZMQ requests"""
-#     import zmq
-#     import zmq.asyncio
-#     import msgpack
-#     import time
-
-#     logger.warning(f"[Enhanced Scheduler {dp_id}] Starting...")
-
-#     # Initialize ZMQ
-#     context = zmq.asyncio.Context()
-
-#     # Receive request socket
-#     request_socket = context.socket(zmq.PULL)
-#     request_port = dp_config.scheduler_base_port
-#     request_address = f"tcp://{dp_config.scheduler_base_host}:{request_port}"
-#     request_socket.bind(request_address)
-#     logger.warning(
-#         f"[Enhanced Scheduler {dp_id}] Listening to requests: {request_address}"
-#     )
-
-#     # Send statistics socket
-#     stats_socket = context.socket(zmq.PUSH)
-#     stats_address = f"tcp://{dp_config.router.host}:{dp_config.router.stats_port}"  # Router stats port
-#     stats_socket.connect(stats_address)
-#     logger.warning(
-#         f"[Enhanced Scheduler {dp_id}] connected to stats service: {stats_address}"
-#     )
-
-#     # Start DP Token Manager
-#     try:
-#         from chitu.dp_token_sender import start_dp_token_manager
-
-#         dp_id = get_global_args().dp_config.dp_id
-#         router_token_address = f"tcp://{dp_config.router.host}:{dp_config.router.token_port}"  # Token Router listen address
-
-#         logger.warning(
-#             f"[Enhanced Scheduler {dp_id}] Starting DP Token Manager, group ID={dp_id}"
-#         )
-#         await start_dp_token_manager(dp_id, router_token_address)
-#         logger.warning(
-#             f"[Enhanced Scheduler {dp_id}] DP Token Manager started successfully"
-#         )
-#     except Exception as e:
-#         logger.error(
-#             f"[Enhanced Scheduler {dp_id}] DP Token Manager failed to start: {e}"
-#         )
-#         # print stack trace
-#         import traceback
-
-#         logger.error(
-#             f"[Enhanced Scheduler {dp_id}] DP Token Manager failed to start: {traceback.format_exc()}"
-#         )
-#         return
-
-#     # Performance statistics
-#     processed_requests = 0
-#     start_time = time.time()
-
-#     logger.warning(
-#         f"[Enhanced Scheduler {dp_id}] Starting to process requests, scheduler listening to requests on {request_address}"
-#     )
-#     try:
-#         while True:
-#             # Check if there are requests
-#             if await request_socket.poll(timeout=100):  # 100ms timeout
-#                 try:
-#                     # Receive request
-#                     data = await request_socket.recv()
-#                     request_data = msgpack.unpackb(data, raw=False)
-
-#                     logger.info(
-#                         f"[Enhanced Scheduler {dp_id}] Received request: {request_data.get('request_id', 'unknown')}"
-#                     )
-
-#                     # Process request
-#                     await process_scheduler_request(rank, request_data)
-#                     processed_requests += 1
-
-#                 except Exception as e:
-#                     logger.error(
-#                         f"[Enhanced Scheduler {dp_id}] Failed to process request: {e}"
-#                     )
-
-#             # Send statistics periodically
-#             current_time = time.time()
-#             # Send statistics every second
-#             if (current_time - start_time) >= 1.0:
-#                 elapsed = current_time - start_time
-#                 throughput = processed_requests / elapsed
-
-#                 stats = {
-#                     "scheduler_id": dp_config.dp_id,
-#                     "running_requests": (
-#                         len(Backend.ongoing_reqs)
-#                         if hasattr(Backend, "ongoing_reqs")
-#                         else 0
-#                     ),
-#                     "waiting_requests": (
-#                         len(getattr(Backend.scheduler, "waiting_queue", []))
-#                         if hasattr(Backend, "scheduler") and Backend.scheduler
-#                         else 0
-#                     ),
-#                     "pending_tokens": 0,  # TODO: calculate pending tokens
-#                     "throughput_tokens_per_sec": throughput,
-#                     "last_update_time": current_time,
-#                     "heartbeat": True,
-#                 }
-
-#                 try:
-#                     stats_data = msgpack.packb(stats)
-#                     await stats_socket.send(stats_data)
-#                     logger.debug(
-#                         f"[Enhanced Scheduler {dp_id}] throughput: {throughput:.2f}"
-#                     )
-#                 except Exception as e:
-#                     logger.error(
-#                         f"[Enhanced Scheduler {dp_id}] throughput send failed: {e}"
-#                     )
-
-#                 # Reset counter
-#                 processed_requests = 0
-#                 start_time = current_time
-
-#     except KeyboardInterrupt:
-#         logger.warning(f"[Enhanced Scheduler {dp_id}] Received interrupt signal")
-#     except Exception as e:
-#         logger.error(f"[Enhanced Scheduler {dp_id}] Service exception: {e}")
-#     finally:
-#         # Clean up resources
-#         request_socket.close()
-#         stats_socket.close()
-#         context.term()
-#         logger.warning(f"[Enhanced Scheduler {dp_id}] Service stopped")
-
-
-# async def process_scheduler_request(rank: int, request_data: dict):
-#     """Handle scheduling requests from Router"""
-#     try:
-#         # Build UserRequest object
-#         request_id = request_data.get("request_id", gen_req_id())
-#         message = request_data.get("message", [])
-#         max_new_tokens = request_data.get("max_new_tokens", 50)
-#         temperature = request_data.get("temperature", 1.0)
-#         top_p = request_data.get("top_p", 1.0)
-#         top_k = request_data.get("top_k", 50)
-#         logprobs = request_data.get("logprobs", False)
-#         top_logprobs = request_data.get("top_logprobs", None)
-
-#         # Create UserRequest
-#         user_request = UserRequest(
-#             message=message,
-#             request_id=request_id,
-#             max_new_tokens=max_new_tokens,
-#             temperature=temperature,
-#             top_p=top_p,
-#             top_k=top_k,
-#             logprobs=logprobs,
-#             top_logprobs=top_logprobs,
-#         )
-
-#         # Create Task, honoring stop/ignore_eos semantics from request_data
-#         stop_with_eos = True
-#         if request_data.get("ignore_eos"):
-#             stop_with_eos = False
-#         elif not request_data.get("stop_with_eos"):
-#             stop_with_eos = False
-
-#         task = Task(task_id=request_id, req=user_request, stop_with_eos=stop_with_eos)
-
-#         try:
-#             from chitu.dp_token_sender import get_dp_token_manager
-
-#             dp_id = get_global_args().dp_config.dp_id
-#             token_manager = get_dp_token_manager(dp_id)
-#             # ensure token manager started
-#             await token_manager.start()
-#             if token_manager is not None:
-#                 # Wrap Task to enable token sending
-#                 wrapped_task = token_manager.wrap_task(task)
-#                 TaskPool.add(wrapped_task)
-#             else:
-#                 # If Token Manager not initialized, add the original Task directly
-#                 TaskPool.add(task)
-
-#         except Exception as e:
-#             # If DP Token Manager acquisition fails, fall back to original Task
-#             logger.error(
-#                 f"[Enhanced Scheduler {dp_id}] Failed to get DP Token Manager: {e}"
-#             )
-#             TaskPool.add(task)
-#             logger.warning(
-#                 f"[Enhanced Scheduler {dp_id}] Fallback to original task: {request_id}"
-#             )
-
-#         logger.debug(f"[Enhanced Scheduler {dp_id}] Request handled: {request_id}")
-
-#     except Exception as e:
-#         logger.error(f"[Enhanced Scheduler {dp_id}] Failed to process request: {e}")
-#         import traceback
-
-#         logger.error(
-#             f"[Enhanced Scheduler {dp_id}] Error details: {traceback.format_exc()}"
-#         )
-
-
-# def chitu_start():
-#     Backend.state = BackendState.Running
-
-
-# def chitu_terminate():
-#     if torch.distributed.get_rank() == 0:
-#         Backend.state = BackendState.Terminated
-#         terminated_task = PackedTasksBase(
-#             num_tasks=0,
-#             payload_type=SerializedPackedTasksPayloadType.TerminateBackend,
-#         )
-#         Backend.executor.step(terminated_task)
-
-
-# def chitu_is_terminated():
-#     return Backend.state == BackendState.Terminated

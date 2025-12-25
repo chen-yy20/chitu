@@ -8,6 +8,7 @@ import time
 from typing import List, Optional
 
 from chitu.diffusion.task import DiffusionTaskPool, DiffusionTaskStatus
+from chitu.distributed.parallel_state import get_cfg_group
 
 logger = getLogger(__name__)
 
@@ -20,9 +21,9 @@ class DiffusionScheduler:
     @staticmethod
     def build(infer_args):
         logger.info(f"Building diffusion scheduler: {infer_args=}")
-        return DiffusionScheduler()
+        return DiffusionScheduler(infer_args)
     
-    def __init__(self):
+    def __init__(self, args):
         self.scheduling_ts = 0
         logger.info(f"Initialized FIFO DiffusionScheduler.")
 
@@ -59,7 +60,7 @@ class DiffusionScheduler:
         # 更新任务的调度时间戳
         selected_task.sched_ts = self.scheduling_ts
         
-        logger.debug(f"Scheduled task: {selected_task_id} (type: {selected_task.task_type}, priority: {selected_task.priority})")
+        logger.debug(f"Scheduled task: {selected_task_id} (type: {selected_task.task_type}")
         
         return [selected_task_id]
 
