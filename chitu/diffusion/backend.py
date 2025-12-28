@@ -4,7 +4,7 @@
 
 import gc
 import itertools
-import functools
+from functools import partial
 import os
 import time
 import re
@@ -24,17 +24,6 @@ import torch.distributed as dist
 import torch.distributed.distributed_c10d as c10d
 from safetensors.torch import safe_open
 from tqdm import tqdm
-from chitu.attn_backend import (
-    FlashAttnBackend,
-    FlashInferBackend,
-    FlashMLABackend,
-    NpuAttnBackend,
-    RefAttnBackend,
-    TritonAttnBackend,
-    NpuAttnBackend,
-    HybridAttnBackend,
-)
-from chitu.cache_manager import DenseKVCacheManager, PagedKVCacheManager, GlobalLocalMap
 from chitu.custom_gguf import *
 from chitu.device_type import is_ascend, is_muxi
 from chitu.distributed.parallel_state import (
@@ -56,6 +45,8 @@ from chitu.utils import (
     try_import_opt_dep,
     ceil_div,
 )
+from chitu.distributed.parallel_state import get_cp_group
+from chitu.diffusion.modules.attention.diffusion_attn_backend import DiffusionAttnBackend, DiffusionAttention_with_CP
 
 # from chitu.distributed.moe_token_dispatcher import init_token_dispatcher
 from chitu.backend import BackendState
@@ -131,7 +122,7 @@ class DiffusionBackend:
 
 
     @staticmethod
-    def _build_model_architecture(args, attn_backend):
+    def _build_model_architecture(args, attn_backend, rope_impl):
         try:
             model_type = ModelType(args.type)
         except ValueError:
@@ -150,7 +141,7 @@ class DiffusionBackend:
             ValueError(f"Unsupported model type: {args.type}")
         
         # 创建模型实例
-        model = model_cls(model_type=args.task, **model_kwargs)
+        model = model_cls(model_type=args.task, attn_backend=attn_backend, rope_impl=rope_impl, **model_kwargs)
         
         return model
     
@@ -321,44 +312,27 @@ class DiffusionBackend:
         pass
 
     @staticmethod
-    def _get_attention_backend_type(args):
-        if args.infer.attn_type == "auto":
-            if is_ascend():
-                return NpuAttnBackend
-            elif args.infer.op_impl == "cpu":
-                return RefAttnBackend
-            elif "deepseek-v3" in args.models.type:
-                return FlashMLABackend
-            else:
-                return HybridAttnBackend
-        elif args.infer.attn_type == "cpu":
-            return RefAttnBackend
-        elif args.infer.attn_type == "flash_attn":
-            return FlashAttnBackend
-        elif args.infer.attn_type == "flash_mla":
-            return FlashMLABackend
-        elif args.infer.attn_type == "flash_infer":
-            return FlashInferBackend
-        elif args.infer.attn_type == "triton":
-            return TritonAttnBackend
-        elif args.infer.attn_type == "npu":
-            return NpuAttnBackend
-        elif args.infer.attn_type == "ref":
-            return RefAttnBackend
-        else:
-            raise ValueError(f"Unknown attn type {args.infer.attn_type}")
+    def _init_attention_backend(args):
+        attn = DiffusionAttnBackend()
+
+        if args.infer.diffusion.cp_size > 1:
+            attn = DiffusionAttention_with_CP(attn, args.infer.diffusion.up_limit)
+        
+        DiffusionBackend.attn = attn
+        return attn
+    
+    @staticmethod
+    def _get_rope_implementation(args):
+        if args.infer.diffusion.cp_size > 1:
+            from chitu.diffusion.utils.wan_utils import rope_apply_with_cp
+            return partial(rope_apply_with_cp, cp_size=get_cp_group().group_size, cp_rank=get_cp_group().rank_in_group)
+        
+        return None
+
+
 
     @staticmethod
-    def _init_attention_backend(attn_backend_type):
-        # Yes, use `type` instead of `isinstance` here, because `AttnBackend`s inherit each other
-        if attn_backend_type is FlashInferBackend:
-            assert isinstance(DiffusionBackend.cache_manager, PagedKVCacheManager)
-            return attn_backend_type(DiffusionBackend.cache_manager.get_max_num_blocks())
-        else:
-            return attn_backend_type()
-
-    @staticmethod
-    def _build_and_setup_model(args, attn_backend):
+    def _build_and_setup_model(args, attn_backend, rope_impl):
         """
         Build model architecture, load checkpoints, and apply quantization.
 
@@ -375,14 +349,14 @@ class DiffusionBackend:
         if not args.debug.skip_model_load:
             # Build the model. Don't allocate memory yet.
             with torch.device("cuda"): # FIXME: support meta device
-                model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
+                model = DiffusionBackend._build_model_architecture(args.models, attn_backend, rope_impl)
 
             # Load model parameters
             DiffusionBackend._load_checkpoint(model, args)
 
         else:
             # Use initialized weights
-            model = DiffusionBackend._build_model_architecture(args.models, attn_backend)
+            model = DiffusionBackend._build_model_architecture(args.models, attn_backend, rope_impl)
 
         model.eval().requires_grad_(False)
         DiffusionBackend.model = model
@@ -411,16 +385,13 @@ class DiffusionBackend:
         DiffusionBackend.text_encoder = DiffusionBackend._init_text_encoder(args)
         DiffusionBackend.vae = DiffusionBackend._init_vae(args)
 
-        attn_backend_type = DiffusionBackend._get_attention_backend_type(args)
-
-        # TODO: Initialize feature cache manager
-        # DiffusionBackend.cache_manager = DiffusionBackend._init_cache_manager(args, attn_backend_type)
-        # DiffusionBackend.cache_type = args.infer.cache_type
+        # TODO: feature cache manager
 
         # Initialize attention backend
-        attn_backend = DiffusionBackend._init_attention_backend(attn_backend_type)
+        attn_backend = DiffusionBackend._init_attention_backend(args)
+        rope_impl = DiffusionBackend._get_rope_implementation(args)
        
-        DiffusionBackend._build_and_setup_model(args, attn_backend)
+        DiffusionBackend._build_and_setup_model(args, attn_backend, rope_impl)
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         logger.info(

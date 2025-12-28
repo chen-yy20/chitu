@@ -24,8 +24,9 @@ from chitu.utils import get_config_dir_path, gen_req_id
 
 logger = getLogger(__name__)
 
-# Default wan params
-test_diffusion_request = DiffusionUserParams(
+# T2V prompts
+msgs = [
+    DiffusionUserParams(
     role="Alex",
     prompt="A cat walking on grass.",
     seed=42,
@@ -34,14 +35,22 @@ test_diffusion_request = DiffusionUserParams(
     negative_prompt='色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走',
     sample_shift=5.0,
     guidance_scale=7.5,
-    num_inference_steps=5,
+    num_inference_steps=50,
     sample_solver='unipc',
-)
+),
+    DiffusionUserParams(
+    role="Bob",
+    prompt="two cats walking on grass.",
+    seed=42,
+    frame_num=81,
+    size=(832,480),
+    negative_prompt='色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走',
+    sample_shift=5.0,
+    guidance_scale=7.5,
+    num_inference_steps=50,
+    sample_solver='unipc',
+),
 
-
-# T2V prompts
-msgs = [
-    test_diffusion_request,
 ]
 
 def gen_reqs(num_reqs, max_new_tokens, frequency_penalty, is_vl=False):

@@ -31,7 +31,7 @@ from chitu.diffusion.modules.samplers.fm_solvers import (
     retrieve_timesteps,
 )
 from chitu.diffusion.modules.samplers.fm_solvers_unipc import FlowUniPCMultistepScheduler
-from chitu.diffusion.utils.wan_utils import cache_video, rope_apply_with_cp
+from chitu.diffusion.utils.wan_utils import cache_video
 from chitu.diffusion.utils.shared_utils import SequencePadder
 
 
@@ -125,44 +125,48 @@ class CfgDispatcher():
         )
         return gathered_preds[0], gathered_preds[1]
 
-
-def get_cp_dispatcher():
-    return getattr(Generator, 'dispatcher', None)
-
 class ContextParallelDispatcher():
     def __init__(self):
         super().__init__()
         self.group = get_cp_group()
+        self.cp_size = self.group.group_size
         self.rank = self.group.global_rank
         self.local_rank = self.group.local_rank
         self.rank_in_group = self.group.rank_in_group
 
     def dispatch(self, tokens: torch.Tensor):
-        return SequencePadder.split_sequence_padding(tokens, split_dim=1, name='x')[self.rank_in_group]
+        return SequencePadder.split_sequence_padding(tokens, 
+                                                     split_num=self.cp_size,
+                                                     split_dim=1, 
+                                                     name='x')[self.rank_in_group]
     
     def gather(self, tokens: torch.Tensor):
-        tokens_list = [torch.empty_like(tokens) for _ in range(self.group.group_size)]
+        tokens_list = [torch.empty_like(tokens) for _ in range(self.cp_size)]
         dist.all_gather(tensor_list=tokens_list, 
                         tensor=tokens, 
                         group=self.group.gpu_group)
-        return SequencePadder.remove_sequence_padding_and_concat(tokens_list)
+        return SequencePadder.remove_sequence_padding_and_concat(tokens_list, 
+                                                                 gather_dim=1,
+                                                                 name='x')
     
     def wrap_model_compute_with_cp(self):
         """替换DiffusionBackend.model.model_compute方法，添加CP支持"""
         
-        original_method = DiffusionBackend.model.model_compute
+        original_foward = DiffusionBackend.model.model_compute
         def wrapped_compute(tokens, **kwargs):
             tokens = self.dispatch(tokens)
-            logger.info(f"After dispatch: {tokens.shape=}")
-            x = original_method(tokens, **kwargs)
-            logger.info(f"Before gather {x.shape=}")
+            if "seq_lens" in kwargs.keys():
+                kwargs["seq_lens"] = torch.tensor([tokens.size(1)])
+
+            x = original_foward(tokens, **kwargs)
             x = self.gather(x)
             return x
 
         DiffusionBackend.model.model_compute = wrapped_compute
-        DiffusionBackend.model.rope_apply = partial(rope_apply_with_cp, 
-                                                    cp_size=self.group.group_size, 
-                                                    cp_rank=self.rank_in_group)
+
+        # DiffusionBackend.model.rope_apply = partial(rope_apply_with_cp, 
+        #                                             cp_size=self.group.group_size, 
+        #                                             cp_rank=self.rank_in_group)
             
 
 class Generator:
@@ -186,8 +190,6 @@ class Generator:
         # Ensure FIFO
         self.current_task = None # 通过这个储存当前任务的中间状态
 
-    def _prepend_dispatcher(self, dispatcher: TasksDispatcher):
-        self.task_dispatchers.insert(0, dispatcher)
 
     def step(self, task: Optional[DiffusionTask]) -> torch.Tensor:
         # 调度器会给generator task，翻译成kernel -> 运行 -> 正确放置输出 -> 回收对应内存
@@ -195,10 +197,11 @@ class Generator:
         if self.current_task is None: # 生成的最开始，将任务分发到workers
             task_type, task = DiffusionTaskDispatcher().dispatch_metadata(task)
             self.current_task = task
-            dist.barrier()
         else:
             task = self.current_task # 接续当前任务
 
+        torch.cuda.synchronize()
+        dist.barrier()
         task_type = task.task_type if task is not None else None
         assert self.current_task.task_id == task.task_id # 确保任务逐个完成，避免产生太多中间状态
         

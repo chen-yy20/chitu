@@ -8,9 +8,10 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from chitu.models.registry import ModelType, register_model, log_init_params
-from chitu.attn_backend import AttnBackend
 from chitu.diffusion.model_default import WanModelDefaults
 from chitu.diffusion.modules.attention.wan_attention import flash_attention
+from chitu.diffusion.utils.wan_utils import rope_apply_with_cp
+from chitu.distributed.parallel_state import get_cp_group
 
 logger = getLogger(__name__)
 
@@ -44,35 +45,6 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 
-@amp.autocast(device_type="cuda", enabled=False)
-def rope_apply(x, grid_sizes, freqs):
-    n, c = x.size(2), x.size(3) // 2
-
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
-    # loop over samples
-    output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
-
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
-            seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ], dim=-1).reshape(seq_len, 1, -1)
-
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).float()
-
 
 class WanRMSNorm(nn.Module):
 
@@ -105,10 +77,43 @@ class WanLayerNorm(nn.LayerNorm):
         """
         return super().forward(x.float()).type_as(x)
 
+def half(x):
+    return x if x.dtype in (torch.float16, torch.bfloat16) else x.to(torch.bfloat16)
+
+@amp.autocast(device_type="cuda", enabled=False)
+def rope_apply(x, grid_sizes, freqs):
+    n, c = x.size(2), x.size(3) // 2
+
+    # split freqs
+    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    # loop over samples
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
+
+        # precompute multipliers
+        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+            seq_len, n, -1, 2))
+        freqs_i = torch.cat([
+            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ], dim=-1).reshape(seq_len, 1, -1)
+
+        # apply rotary embedding
+        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+        x_i = torch.cat([x_i, x[i, seq_len:]])
+
+        # append to collection
+        output.append(x_i)
+    return torch.stack(output).float()
 
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
+                 attn_func,
+                 rope_impl,
                  dim,
                  num_heads,
                  window_size=(-1, -1),
@@ -124,12 +129,15 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
 
         # layers
+        self.attn_func = attn_func
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.rope_impl = rope_impl or rope_apply
+
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -149,12 +157,16 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
+        rope_q = self.rope_impl(q, grid_sizes, freqs)
+        rope_k = self.rope_impl(k, grid_sizes, freqs)
+
+        x = self.attn_func(
+            q = half(rope_q),
+            k = half(rope_k),
+            v = half(v),
+            window_size=self.window_size
+        )[0]
+        x = x.to(q.dtype)
 
         # output
         x = x.flatten(2)
@@ -180,7 +192,7 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # compute attention
         x = flash_attention(q, k, v, k_lens=context_lens)
-
+        
         # output
         x = x.flatten(2)
         x = self.o(x)
@@ -237,10 +249,11 @@ WAN_CROSSATTENTION_CLASSES = {
     'i2v_cross_attn': WanI2VCrossAttention,
 }
 
-# 这个就是model的核心了，还是attention。
 class WanAttentionBlock(nn.Module):
 
     def __init__(self,
+                 attn_func,
+                 rope_impl,
                  cross_attn_type,
                  dim,
                  ffn_dim,
@@ -260,12 +273,14 @@ class WanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
+        self.self_attn = WanSelfAttention(attn_func, rope_impl, 
+                                          dim, num_heads, window_size, qk_norm, eps)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim,
+        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](attn_func,
+                                                                      rope_impl,
+                                                                      dim,
                                                                       num_heads,
                                                                       (-1, -1),
                                                                       qk_norm,
@@ -315,7 +330,7 @@ class WanAttentionBlock(nn.Module):
             with amp.autocast(device_type="cuda", dtype=torch.float32):
                 x = x + y * e[5]
             return x
-
+        
         x = cross_attn_ffn(x, context, context_lens, e)
         return x
 
@@ -383,7 +398,7 @@ class WanModel(ModelMixin, ConfigMixin):
     ]
     _no_split_modules = ['WanAttentionBlock']
 
-    def __init__(self, model_type='t2v', **kwargs):
+    def __init__(self, model_type='t2v', attn_backend=None, rope_impl=None, **kwargs):
         r"""
         Initialize the diffusion model backbone.
 
@@ -432,7 +447,8 @@ class WanModel(ModelMixin, ConfigMixin):
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, self.dim, self.ffn_dim, self.num_heads,
+            WanAttentionBlock(attn_backend, rope_impl, 
+                              cross_attn_type, self.dim, self.ffn_dim, self.num_heads,
                               self.window_size, self.qk_norm, self.cross_attn_norm, self.eps)
             for _ in range(self.num_layers)
         ])
@@ -478,7 +494,7 @@ class WanModel(ModelMixin, ConfigMixin):
             processed_tokens: 处理后的tokens
         """
         x = tokens
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x = block(x, **kwargs)
         return x
         
