@@ -9,6 +9,8 @@ if [ $cp_size -eq 0 ]; then
     cp_size=1
 fi
 
-./script/srun_multi_node.sh 1 $num_gpus ./chitu/diffusion/test_generate.py models=Wan2.1-T2V-1.3B models.ckpt_dir="/home/zhongrx/cyy/Wan2.1/Wan2.1-T2V-1.3B" \
-    infer.seed=42 \
-    infer.diffusion.cp_size=$cp_size infer.diffusion.up_limit=8
+model="Wan2.1-T2V-1.3B"
+ckpt_dir="/home/zhongrx/cyy/Wan2.1/Wan2.1-T2V-1.3B"
+
+./script/srun_multi_node.sh 1 $num_gpus ./chitu/diffusion/test_generate.py models=$model models.ckpt_dir=$ckpt_dir \
+    infer.diffusion.cp_size=$cp_size infer.diffusion.up_limit=2

@@ -358,7 +358,7 @@ def initialize_cp_group(cp_size: int, cfg_size: int, rank: int, local_rank: int,
     
     _CP_GROUP = CommGroup(rank_list, rank, local_rank)
 
-def initialize_up_groups(up_dividers: List[int], up_limit: int, cfg_size: int, rank: int, local_rank: int, world_size: int):
+def initialize_up_groups(up_sizes: List[int], up_limit: int, cfg_size: int, rank: int, local_rank: int, world_size: int):
     global _UP_GROUP_DICT
     assert _UP_GROUP_DICT is None
     
@@ -378,23 +378,22 @@ def initialize_up_groups(up_dividers: List[int], up_limit: int, cfg_size: int, r
     else:
         cp_group_ranks = [list(range(world_size))]
     
-    for divider in up_dividers:
-        if cp_group_size % divider != 0:
+    for up_size in up_sizes:
+        if cp_group_size % up_size != 0:
             continue
             
-        up_stride = cp_group_size // divider
-        if up_stride > up_limit:
+        if up_size > up_limit:
             continue
             
         rank_list = []
         for cp_ranks in cp_group_ranks:
-            for i in range(0, len(cp_ranks), up_stride):
-                group = cp_ranks[i:i+up_stride]
+            for i in range(0, len(cp_ranks), up_size):
+                group = cp_ranks[i:i+up_size]
                 if group:
                     rank_list.append(group)
         
         if rank_list:
-            _UP_GROUP_DICT[up_stride] = CommGroup(rank_list, rank, local_rank)
+            _UP_GROUP_DICT[up_size] = CommGroup(rank_list, rank, local_rank)
 
 def initialize_diffusion_parallel_groups(
     cfg_size: int,
@@ -416,9 +415,8 @@ def initialize_diffusion_parallel_groups(
     initialize_world_group(rank, local_rank, world_size)
     initialize_cfg_group(cfg_size, rank, local_rank, world_size)
     initialize_cp_group(cp_size, cfg_size, rank, local_rank, world_size)
-    # up_dividers = [1, 2, 4] # DiTango Support
-    up_dividers = [1]
-    initialize_up_groups(up_dividers, up_limit, cfg_size, rank, local_rank, world_size)
+    up_sizes = [up_limit] # TODO: More up sizes to support DiTango Support
+    initialize_up_groups(up_sizes, up_limit, cfg_size, rank, local_rank, world_size)
     
     # Debug logging
     if rank == 0:

@@ -303,12 +303,13 @@ class CommGroup:
     
     # ==================== For Diffusion Ring Attention =================
     def p2p_isend(self, tensor: torch.Tensor, dst: int):
-        dst = (self.rank_in_group + 1) % self.group_size
+        # logger.info(f"R{self.global_rank}| send to {self.rank_list[dst]}")
         send_op = torch.distributed.P2POp(torch.distributed.isend, tensor, self.rank_list[dst], self.gpu_group)
         self.p2p_ops.append(send_op)
 
     def p2p_irecv(self, size: torch.Size, dtype: torch.dtype, src: int):
         tensor = torch.empty(size, dtype=dtype, device=self.device)
+        # logger.info(f"R{self.global_rank}| recv from {self.rank_list[src]}")
         recv_op = torch.distributed.P2POp(torch.distributed.irecv, tensor, self.rank_list[src], self.gpu_group)
         self.p2p_ops.append(recv_op)
         return tensor

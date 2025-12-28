@@ -253,7 +253,6 @@ class DiffusionAttention_with_CP:
         
         for ring_step in range(ring_steps):
             if ring_step + 1 != ring_steps:
-
                 if use_varlen:
                     data_pack = (k, v, cu_seqlens_k)
                 else:
