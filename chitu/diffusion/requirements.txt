@@ -11,3 +11,4 @@ scipy==1.16.3
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 tqdm==4.67.1
+imageio-ffmpeg==0.6.0

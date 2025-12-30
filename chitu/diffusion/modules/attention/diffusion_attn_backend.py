@@ -19,13 +19,6 @@ except ModuleNotFoundError:
 
 
 logger = getLogger(__name__)
-
-# 使用示例:
-# tensor = torch.randn(4, 5)
-# tensor[1, 2] = float('nan')
-# tensor[3, 4] = float('nan')
-# count_nans(tensor, "example_tensor")
-
 class DiffusionAttnBackend:
     """
     统一 flash-attn v2/v3 的调用入口。

@@ -291,7 +291,6 @@ class Generator:
                 )
             noise_pred = noise_pred_uncond + \
                 task.req.params.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            logger.info(f"do cfg: {noise_pred.shape=}")
         else:
             noise_pred = DiffusionBackend.model(
                 latent_model_input,
