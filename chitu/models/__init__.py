@@ -15,3 +15,4 @@ from chitu.models import model_llama  # NOQA
 
 # diffusion
 from chitu.models.diffusion import model_wan_21  # NOQA
+from chitu.models.diffusion import model_wan_22  # NOQA

@@ -20,6 +20,7 @@ class ModelType(str, Enum):
     HF_QWEN3_NEXT = "hf-qwen3-next"
     # Diffusion models
     WAN_21="diff-wan"
+    WAN_22="diff-wan-22"
 
 
 def register_model(name: str | ModelType):

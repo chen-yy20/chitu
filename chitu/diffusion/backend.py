@@ -65,6 +65,8 @@ logger = getLogger(__name__)
 class DiffusionBackend:
     # init once
     model = None
+    high_noise_model = None # Wan2.2
+    low_noise_model = None # Wan2.2
     formatter = None
     args = None
     # --- cache_manager related (not used in the current code)
@@ -135,48 +137,58 @@ class DiffusionBackend:
         logger.info(f"Building model with args: {args.transformer}")
 
         # # 从 args.transformer 构建正确的模型参数
-        if args.type == "diff-wan":
+        if args.type in ["diff-wan", "diff-wan-22"]:
             model_kwargs = args.transformer
         else:
-            ValueError(f"Unsupported model type: {args.type}")
+            raise ValueError(f"Unsupported model type: {args.type}")
         
         # 创建模型实例
         model = model_cls(model_type=args.task, attn_backend=attn_backend, rope_impl=rope_impl, **model_kwargs)
         
         return model
     
-    @staticmethod 
-    def _load_checkpoint(model, args):
-        """Load Wan model checkpoint from safetensors file."""
+    # hmx: refactored to support multi-part checkpoint loading
+    @staticmethod
+    def _load_checkpoint(model, path, args):
+        """load multi-part checkpoint(*.safetensors) from a directory or a single file"""
+        path = os.path.expanduser(path)
+
+        if os.path.isfile(path):
+            checkpoint_files = [path]
+        else:
+            checkpoint_files = sorted(glob(os.path.join(path, "*.safetensors")))
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint files found in : {path}")
         
-        ckpt_path = os.path.join(args.models.ckpt_dir, "diffusion_pytorch_model.safetensors")
+        logger.info(f"Loading checkpoint from directory: {path} with {len(checkpoint_files)} parts.")
         
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-        
-        logger.info(f"Loading Wan checkpoint from: {ckpt_path}")
-        
-        # 加载权重
-        checkpoint = st.load_file(ckpt_path, device="cpu")
-        
-        # 处理设备转移
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if next(model.parameters()).device.type == 'meta':
             model.to_empty(device=device)
         
-        # 加载权重
         model_dict = model.state_dict()
-        filtered_dict = {k: v.to(device) for k, v in checkpoint.items() 
-                        if k in model_dict and v.shape == model_dict[k].shape}
+        all_loaded_keys = set()
         
-        missing, unexpected = model.load_state_dict(filtered_dict, strict=False)
-        
-        if missing:
-            logger.warning(f"Missing {len(missing)} keys")
-        if unexpected:
-            logger.warning(f"Unexpected {len(unexpected)} keys")
+        for ckpt_file in checkpoint_files:
+            logger.info(f"Loading checkpoint part: {ckpt_file}")
+            checkpoint = st.load_file(ckpt_file, device="cpu")
+            filtered_dict = {k: v.to(device) for k, v in checkpoint.items() 
+                            if k in model_dict and v.shape == model_dict[k].shape}
             
-        logger.info(f"Loaded {len(filtered_dict)}/{len(model_dict)} parameters")
+            _, unexpected = model.load_state_dict(filtered_dict, strict=False)
+
+            all_loaded_keys.update(filtered_dict.keys())
+
+            if unexpected:
+                logger.warning(f"Unexpected {len(unexpected)} keys in part {ckpt_file}")
+            
+       # Check for missing keys after iterating through all checkpoint files
+        missing = set(model_dict.keys()) - all_loaded_keys
+        if missing:
+            logger.warning(f"Missing {len(missing)} keys after loading all parts.")
+            
+        logger.info(f"Loaded {len(all_loaded_keys)}/{len(model_dict)} parameters from directory checkpoints.")
+    
 
     # FIXME: When cache type is "skew", gloo backend cannot be used.
     @staticmethod
@@ -267,7 +279,7 @@ class DiffusionBackend:
             Initialized processor or None if not a multimodal model
         """
 
-        if args.models.name == "Wan2.1-T2V-1.3B":
+        if args.models.name in ["Wan2.1-T2V-1.3B", "Wan2.2-T2V-A14B"]:
             from chitu.diffusion.modules.encoders.t5 import T5EncoderModel
             logger.info(f"Initializing T5 encoder for {args.models.name}")
 
@@ -293,7 +305,7 @@ class DiffusionBackend:
         Arguments:
             args: Configuration with model settings
         """
-        if args.models.name in ["Wan2.1-T2V-1.3B"]:
+        if args.models.name in ["Wan2.1-T2V-1.3B", "Wan2.2-T2V-A14B"]:
             from chitu.diffusion.modules.vaes.wan_vae import WanVAE
             logger.info(f"Initializing Wan VAE for {args.models.name}")
 
@@ -329,8 +341,7 @@ class DiffusionBackend:
         
         return None
 
-
-
+    # hmx: refactored for Wan2.2 because it has two noise models
     @staticmethod
     def _build_and_setup_model(args, attn_backend, rope_impl):
         """
@@ -339,12 +350,57 @@ class DiffusionBackend:
         Arguments:
             args: Configuration with model settings
             attn_backend: The initialized attention backend
-∑
-        Returns:
-            Fully set up model
+            rope_impl: The rope implementation for the model
         """
         # convert args.models lists to tuples
         args.models = DiffusionBackend.convert_config(args.models)
+        DiffusionBackend.args = args
+
+        if args.models.name in ["Wan2.1-T2V-1.3B"]:
+            ckpt_path = os.path.join(args.models.ckpt_dir, "diffusion_pytorch_model.safetensors")
+            DiffusionBackend.model = DiffusionBackend._build_and_setup_single_model(
+                args, 
+                ckpt_path,
+                attn_backend, 
+                rope_impl
+            )
+        elif args.models.name in ["Wan2.2-T2V-A14B"]:
+            # build high noise model
+            high_ckpt_path = os.path.join(args.models.ckpt_dir, args.models.high_noise_checkpoint)
+            DiffusionBackend.high_noise_model = DiffusionBackend._build_and_setup_single_model(
+                args, 
+                high_ckpt_path, 
+                attn_backend, 
+                rope_impl
+            )
+            # build low noise model
+            low_ckpt_path = os.path.join(args.models.ckpt_dir, args.models.low_noise_checkpoint)
+            DiffusionBackend.low_noise_model = DiffusionBackend._build_and_setup_single_model(
+                args, 
+                low_ckpt_path, 
+                attn_backend, 
+                rope_impl
+            )
+        else:
+            raise ValueError(f"Unsupported model name: {args.models.name}")
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    @staticmethod
+    def _build_and_setup_single_model(args, ckpt_path, attn_backend, rope_impl):
+        """
+        Build single model architecture, load checkpoints, and apply quantization.
+
+        Arguments:
+            args: Configuration with model settings
+            ckpt_path: Checkpoint path for the model
+            attn_backend: The initialized attention backend
+            rope_impl: The rope implementation for the model
+
+        Returns:
+            Fully set up single model
+        """
 
         if not args.debug.skip_model_load:
             # Build the model. Don't allocate memory yet.
@@ -352,18 +408,15 @@ class DiffusionBackend:
                 model = DiffusionBackend._build_model_architecture(args.models, attn_backend, rope_impl)
 
             # Load model parameters
-            DiffusionBackend._load_checkpoint(model, args)
+            DiffusionBackend._load_checkpoint(model, ckpt_path, args)
 
         else:
             # Use initialized weights
             model = DiffusionBackend._build_model_architecture(args.models, attn_backend, rope_impl)
 
         model.eval().requires_grad_(False)
-        DiffusionBackend.model = model
-        DiffusionBackend.args = args
+        return model
 
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 
@@ -406,6 +459,8 @@ class DiffusionBackend:
     @staticmethod
     def stop():
         setattr(DiffusionBackend, "model", None)
+        setattr(DiffusionBackend, "high_noise_model", None)
+        setattr(DiffusionBackend, "low_noise_model", None)
         setattr(DiffusionBackend, "cache_manager", None)
         gc.collect()
         torch.cuda.empty_cache()

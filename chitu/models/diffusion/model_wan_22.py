@@ -1,12 +1,16 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
-
+from logging import getLogger
 import torch
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention
+from chitu.models.registry import ModelType, register_model, log_init_params
+from chitu.diffusion.model_default import Wan22ModelDefaults
+from chitu.diffusion.modules.attention.wan_attention import flash_attention
+
+logger = getLogger(__name__)
 
 __all__ = ['WanModel']
 
@@ -101,6 +105,8 @@ class WanLayerNorm(nn.LayerNorm):
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
+                 attn_func,
+                 rope_impl,
                  dim,
                  num_heads,
                  window_size=(-1, -1),
@@ -116,12 +122,14 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
 
         # layers
+        self.attn_func = attn_func
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.rope_impl = rope_impl or rope_apply
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -142,9 +150,9 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+        x = self.attn_func(
+            q=self.rope_impl(q, grid_sizes, freqs),
+            k=self.rope_impl(k, grid_sizes, freqs),
             v=v,
             k_lens=seq_lens,
             window_size=self.window_size)
@@ -183,6 +191,8 @@ class WanCrossAttention(WanSelfAttention):
 class WanAttentionBlock(nn.Module):
 
     def __init__(self,
+                 attn_func,
+                 rope_impl,
                  dim,
                  ffn_dim,
                  num_heads,
@@ -201,13 +211,13 @@ class WanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
+        self.self_attn = WanSelfAttention(attn_func, rope_impl, 
+                                          dim, num_heads, window_size, qk_norm, eps)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm,
-                                            eps)
+        self.cross_attn = WanCrossAttention(attn_func, rope_impl, 
+                                            dim, num_heads, (-1, -1), qk_norm, eps)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
@@ -291,6 +301,7 @@ class Head(nn.Module):
         return x
 
 @register_model(ModelType.WAN_22)
+@log_init_params
 class WanModel(ModelMixin, ConfigMixin):
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
@@ -302,22 +313,7 @@ class WanModel(ModelMixin, ConfigMixin):
     _no_split_modules = ['WanAttentionBlock']
 
     @register_to_config
-    def __init__(self,
-                 model_type='t2v',
-                 patch_size=(1, 2, 2),
-                 text_len=512,
-                 in_dim=16,
-                 dim=2048,
-                 ffn_dim=8192,
-                 freq_dim=256,
-                 text_dim=4096,
-                 out_dim=16,
-                 num_heads=16,
-                 num_layers=32,
-                 window_size=(-1, -1),
-                 qk_norm=True,
-                 cross_attn_norm=True,
-                 eps=1e-6):
+    def __init__(self, model_type='t2v', attn_backend=None, rope_impl=None, **kwargs):
         r"""
         Initialize the diffusion model backbone.
 
@@ -356,47 +352,51 @@ class WanModel(ModelMixin, ConfigMixin):
 
         super().__init__()
 
+        logger.info(f"Initializing WanModel with model_type={model_type}")
+
         assert model_type in ['t2v', 'i2v', 'ti2v', 's2v']
         self.model_type = model_type
 
-        self.patch_size = patch_size
-        self.text_len = text_len
-        self.in_dim = in_dim
-        self.dim = dim
-        self.ffn_dim = ffn_dim
-        self.freq_dim = freq_dim
-        self.text_dim = text_dim
-        self.out_dim = out_dim
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.window_size = window_size
-        self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
-        self.eps = eps
+        # 使用默认值填充缺失的参数
+        defaults = Wan22ModelDefaults()
+
+        self.patch_size = kwargs.get('patch_size', defaults.patch_size)
+        self.text_len = kwargs.get('text_len', defaults.text_len)
+        self.in_dim = kwargs.get('in_dim', defaults.in_dim)
+        self.dim = kwargs.get('dim', defaults.dim)
+        self.ffn_dim = kwargs.get('ffn_dim', defaults.ffn_dim)
+        self.freq_dim = kwargs.get('freq_dim', defaults.freq_dim)
+        self.text_dim = kwargs.get('text_dim', defaults.text_dim)
+        self.out_dim = kwargs.get('out_dim', defaults.out_dim)
+        self.num_heads = kwargs.get('num_heads', defaults.num_heads)
+        self.num_layers = kwargs.get('num_layers', defaults.num_layers)
+        self.window_size = kwargs.get('window_size', defaults.window_size)
+        self.qk_norm = kwargs.get('qk_norm', defaults.qk_norm)
+        self.cross_attn_norm = kwargs.get('cross_attn_norm', defaults.cross_attn_norm)
+        self.eps = kwargs.get('eps', defaults.eps)
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
-            in_dim, dim, kernel_size=patch_size, stride=patch_size)
+            self.in_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size)
         self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-            nn.Linear(dim, dim))
+            nn.Linear(self.text_dim, self.dim), nn.GELU(approximate='tanh'),
+            nn.Linear(self.dim, self.dim))
 
         self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
-
+            nn.Linear(self.freq_dim, self.dim), nn.SiLU(), nn.Linear(self.dim, self.dim))
+        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(self.dim, self.dim * 6))
         # blocks
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
-                              cross_attn_norm, eps) for _ in range(num_layers)
+            WanAttentionBlock(attn_backend, rope_impl, 
+                              self.dim, self.ffn_dim, self.num_heads, self.window_size, self.qk_norm,
+                              self.cross_attn_norm, self.eps) for _ in range(self.num_layers)
         ])
 
         # head
-        self.head = Head(dim, out_dim, patch_size, eps)
-
+        self.head = Head(self.dim, self.out_dim, self.patch_size, self.eps)
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
-        assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
-        d = dim // num_heads
+        assert (self.dim % self.num_heads) == 0 and (self.dim // self.num_heads) % 2 == 0
+        d = self.dim // self.num_heads
         self.freqs = torch.cat([
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
@@ -406,6 +406,33 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # initialize weights
         self.init_weights()
+
+    def _single_input_preprocess(self, x, t, context, y):
+        x = [x]
+        t = t.unsqueeze(0)
+        context = [context]
+        if y is not None:
+            y = [y]
+        return x, t, context, y
+
+    def model_compute(self, tokens, **kwargs):
+        r"""
+        Forward pass through the transformer blocks.
+
+        Args:
+            x (Tensor):
+                Input token tensor
+            kwargs:
+                Additional arguments for the attention blocks
+
+        Returns:
+            Tensor:
+                Output token tensor
+        """
+        x = tokens
+        for block in self.blocks:
+            x = block(x, **kwargs)
+        return x
 
     def forward(
         self,
@@ -434,6 +461,9 @@ class WanModel(ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
+        if not isinstance(x, list):
+            x, t, context, y = self._single_input_preprocess(x, t, context, y)
+
         if self.model_type == 'i2v':
             assert y is not None
         # params
@@ -451,7 +481,8 @@ class WanModel(ModelMixin, ConfigMixin):
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
-        x = torch.cat([
+
+        tokens = torch.cat([
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                       dim=1) for u in x
         ])
@@ -486,8 +517,7 @@ class WanModel(ModelMixin, ConfigMixin):
             context=context,
             context_lens=context_lens)
 
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        x = self.model_compute(tokens, **kwargs)
 
         # head
         x = self.head(x, e)

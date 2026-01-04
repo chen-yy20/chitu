@@ -152,17 +152,25 @@ class ContextParallelDispatcher():
     def wrap_model_compute_with_cp(self):
         """替换DiffusionBackend.model.model_compute方法，添加CP支持"""
         
-        original_foward = DiffusionBackend.model.model_compute
-        def wrapped_compute(tokens, **kwargs):
-            tokens = self.dispatch(tokens)
-            if "seq_lens" in kwargs.keys():
-                kwargs["seq_lens"] = torch.tensor([tokens.size(1)])
+        def create_wrapped_forward(model_instance):
+            original_forward = model_instance.model_compute
+            def wrapped_compute(tokens, **kwargs):
+                tokens = self.dispatch(tokens)
+                if "seq_lens" in kwargs.keys():
+                    kwargs["seq_lens"] = torch.tensor([tokens.size(1)])
+                x = original_forward(tokens, **kwargs)
+                x = self.gather(x)
+                return x
+            return wrapped_compute
 
-            x = original_foward(tokens, **kwargs)
-            x = self.gather(x)
-            return x
-
-        DiffusionBackend.model.model_compute = wrapped_compute
+        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
+            # pack two models
+            DiffusionBackend.high_noise_model.model_compute = create_wrapped_forward(DiffusionBackend.high_noise_model)
+            DiffusionBackend.low_noise_model.model_compute = create_wrapped_forward(DiffusionBackend.low_noise_model)
+        elif DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
+            DiffusionBackend.model.model_compute = create_wrapped_forward(DiffusionBackend.model)
+        else:
+            raise NotImplementedError("Unsupported model for CP.")
 
         # DiffusionBackend.model.rope_apply = partial(rope_apply_with_cp, 
         #                                             cp_size=self.group.group_size, 
@@ -262,6 +270,19 @@ class Generator:
         latent_model_input = task.buffer.latents
         timestep = task.buffer.timesteps[task.buffer.current_step]
 
+        if DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
+            model = DiffusionBackend.model
+            noise_guidance_scale = task.req.params.guidance_scale
+        elif DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
+            if timestep >= DiffusionBackend.args.transformers.boundary * DiffusionBackend.args.transformers.num_train_timesteps:
+                noise_guidance_scale = DiffusionBackend.args.transformers.high_guide_scale
+                model = DiffusionBackend.high_noise_model
+            else:
+                noise_guidance_scale = DiffusionBackend.args.transformers.low_guide_scale
+                model = DiffusionBackend.low_noise_model
+        else:
+            raise NotImplementedError("Unsupported model for denoising.")
+
         if task.do_cfg: # Wan的cfg是做两次
             if self.cfg_size == 2:
                 if get_cfg_group().rank_in_group == 0:
@@ -269,7 +290,7 @@ class Generator:
                 else:
                     context = task.buffer.negative_embeddings
 
-                cfg_partial_noise_pred = DiffusionBackend.model(
+                cfg_partial_noise_pred = model(
                     latent_model_input,
                     t=timestep,
                     context=context,
@@ -277,22 +298,22 @@ class Generator:
                 )
                 noise_pred_cond, noise_pred_uncond = self.cfg_dispatcher.all_gather_cfg_noise_preds(cfg_partial_noise_pred)
             else:
-                noise_pred_cond = DiffusionBackend.model(
+                noise_pred_cond = model(
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.text_embeddings,
                     seq_len=task.buffer.seq_len
                 )
-                noise_pred_uncond = DiffusionBackend.model(
+                noise_pred_uncond = model(
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.negative_embeddings,
                     seq_len=task.buffer.seq_len
                 )
             noise_pred = noise_pred_uncond + \
-                task.req.params.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                noise_guidance_scale * (noise_pred_cond - noise_pred_uncond)
         else:
-            noise_pred = DiffusionBackend.model(
+            noise_pred = model(
                 latent_model_input,
                 t=timestep,
                 context=task.buffer.text_embeddings,
@@ -410,7 +431,13 @@ class Generator:
         task.buffer.timesteps = timesteps
         task.buffer.seq_len = seq_len
         
-        DiffusionBackend.model.to(device)
+        if DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
+            DiffusionBackend.model.to(device)
+        elif DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
+            DiffusionBackend.low_noise_model.to(device)
+            DiffusionBackend.high_noise_model.to(device)    
+        else:
+            raise NotImplementedError("Unsupported model for denoising.")
 
         logger.info(f"[Pre Denoise] Init {latents.shape=} {timesteps=}")
 
