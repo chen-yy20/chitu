@@ -270,10 +270,9 @@ class Generator:
         latent_model_input = task.buffer.latents
         timestep = task.buffer.timesteps[task.buffer.current_step]
 
-        if DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
-            model = DiffusionBackend.model
-            noise_guidance_scale = task.req.params.guidance_scale
-        elif DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
+    
+        # FIXME: reduce branch
+        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
             if timestep >= DiffusionBackend.args.transformers.boundary * DiffusionBackend.args.transformers.num_train_timesteps:
                 noise_guidance_scale = DiffusionBackend.args.transformers.high_guide_scale
                 model = DiffusionBackend.high_noise_model
@@ -281,7 +280,8 @@ class Generator:
                 noise_guidance_scale = DiffusionBackend.args.transformers.low_guide_scale
                 model = DiffusionBackend.low_noise_model
         else:
-            raise NotImplementedError("Unsupported model for denoising.")
+            model = DiffusionBackend.model
+            noise_guidance_scale = task.req.params.guidance_scale
 
         if task.do_cfg: # Wan的cfg是做两次
             if self.cfg_size == 2:
@@ -431,13 +431,12 @@ class Generator:
         task.buffer.timesteps = timesteps
         task.buffer.seq_len = seq_len
         
-        if DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
-            DiffusionBackend.model.to(device)
-        elif DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
+        # FIXME: Reduce specified branch
+        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
             DiffusionBackend.low_noise_model.to(device)
             DiffusionBackend.high_noise_model.to(device)    
         else:
-            raise NotImplementedError("Unsupported model for denoising.")
+            DiffusionBackend.model.to(device)
 
         logger.info(f"[Pre Denoise] Init {latents.shape=} {timesteps=}")
 

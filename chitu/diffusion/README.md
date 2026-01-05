@@ -16,8 +16,12 @@ Flash Attention建议用wheel安装：https://github.com/Dao-AILab/flash-attenti
 建议使用huggingface-cli安装，国内使用hf-mirror.
 
 ```
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir ./ckpts
+HF_ENDPOINT=https://hf-mirror.com hf download <model-id> --local-dir ./ckpts
 ```
+
+> Supported model-ids:
+> * Wan-AI/Wan2.1-T2V-1.3B
+> * Wan-AI/Wan2.2-T2V-A14B
 
 # Run Demo
 **模型架构参数**(层数、注意力头数等)是静态的，在`chitu/config/models/Wan2.1-T2V-1.3B.yaml`中进行设置。

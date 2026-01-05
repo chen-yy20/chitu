@@ -152,15 +152,50 @@ class DiffusionBackend:
     def _load_checkpoint(model, path, args):
         """load multi-part checkpoint(*.safetensors) from a directory or a single file"""
         path = os.path.expanduser(path)
-
-        if os.path.isfile(path):
-            checkpoint_files = [path]
-        else:
-            checkpoint_files = sorted(glob(os.path.join(path, "*.safetensors")))
-        if not checkpoint_files:
-            raise FileNotFoundError(f"No checkpoint files found in : {path}")
         
-        logger.info(f"Loading checkpoint from directory: {path} with {len(checkpoint_files)} parts.")
+        checkpoint_files = []
+        
+        if os.path.isfile(path):
+            # 单个文件的情况
+            checkpoint_files = [path]
+        elif os.path.isdir(path):
+            # 目录的情况，直接查找所有 .safetensors 文件
+            checkpoint_files = sorted(glob(os.path.join(path, "*.safetensors")))
+        else:
+            # 可能是 HuggingFace 风格的分片模型路径（不存在的单文件）
+            base_dir = os.path.dirname(path)
+            base_name = os.path.basename(path)
+            
+            # 检查是否有对应的索引文件
+            index_file = os.path.join(base_dir, f"{base_name}.index.json")
+            
+            if os.path.exists(index_file):
+                # 有索引文件，读取分片文件列表
+                import json
+                with open(index_file, 'r') as f:
+                    index_data = json.load(f)
+                
+                # 获取所有分片文件名并排序
+                shard_files = set(index_data.get('weight_map', {}).values())
+                checkpoint_files = sorted([
+                    os.path.join(base_dir, shard_file) 
+                    for shard_file in shard_files 
+                    if shard_file.endswith('.safetensors')
+                ])
+            else:
+                # 没有索引文件，尝试查找匹配的分片文件
+                base_pattern = base_name.replace('.safetensors', '')
+                pattern = os.path.join(base_dir, f"{base_pattern}-*-of-*.safetensors")
+                checkpoint_files = sorted(glob(pattern))
+                
+                # 如果还是没找到，尝试在目录中查找所有 safetensors 文件
+                if not checkpoint_files:
+                    checkpoint_files = sorted(glob(os.path.join(base_dir, "*.safetensors")))
+        
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint files found for path: {path}")
+        
+        logger.info(f"Loading checkpoint from {len(checkpoint_files)} file(s): {checkpoint_files}")
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if next(model.parameters()).device.type == 'meta':
@@ -170,8 +205,17 @@ class DiffusionBackend:
         all_loaded_keys = set()
         
         for ckpt_file in checkpoint_files:
+            if not os.path.exists(ckpt_file):
+                logger.warning(f"Checkpoint file does not exist: {ckpt_file}")
+                continue
+                
             logger.info(f"Loading checkpoint part: {ckpt_file}")
-            checkpoint = st.load_file(ckpt_file, device="cpu")
+            try:
+                checkpoint = st.load_file(ckpt_file, device="cpu")
+            except Exception as e:
+                logger.error(f"Failed to load {ckpt_file}: {e}")
+                continue
+                
             filtered_dict = {k: v.to(device) for k, v in checkpoint.items() 
                             if k in model_dict and v.shape == model_dict[k].shape}
             
@@ -182,13 +226,12 @@ class DiffusionBackend:
             if unexpected:
                 logger.warning(f"Unexpected {len(unexpected)} keys in part {ckpt_file}")
             
-       # Check for missing keys after iterating through all checkpoint files
+        # Check for missing keys after iterating through all checkpoint files
         missing = set(model_dict.keys()) - all_loaded_keys
         if missing:
-            logger.warning(f"Missing {len(missing)} keys after loading all parts.")
+            logger.warning(f"Missing {len(missing)} keys after loading all parts: {list(missing)[:10]}...")
             
-        logger.info(f"Loaded {len(all_loaded_keys)}/{len(model_dict)} parameters from directory checkpoints.")
-    
+        logger.info(f"Loaded {len(all_loaded_keys)}/{len(model_dict)} parameters from checkpoint files.")
 
     # FIXME: When cache type is "skew", gloo backend cannot be used.
     @staticmethod
@@ -279,7 +322,7 @@ class DiffusionBackend:
             Initialized processor or None if not a multimodal model
         """
 
-        if args.models.name in ["Wan2.1-T2V-1.3B", "Wan2.2-T2V-A14B"]:
+        if "Wan" in args.models.name:
             from chitu.diffusion.modules.encoders.t5 import T5EncoderModel
             logger.info(f"Initializing T5 encoder for {args.models.name}")
 
@@ -305,7 +348,7 @@ class DiffusionBackend:
         Arguments:
             args: Configuration with model settings
         """
-        if args.models.name in ["Wan2.1-T2V-1.3B", "Wan2.2-T2V-A14B"]:
+        if "Wan" in args.models.name:
             from chitu.diffusion.modules.vaes.wan_vae import WanVAE
             logger.info(f"Initializing Wan VAE for {args.models.name}")
 
@@ -356,7 +399,7 @@ class DiffusionBackend:
         args.models = DiffusionBackend.convert_config(args.models)
         DiffusionBackend.args = args
 
-        if args.models.name in ["Wan2.1-T2V-1.3B"]:
+        if args.models.name in ["Wan2.1-T2V-1.3B", "Wan2.1-T2V-14B"]:
             ckpt_path = os.path.join(args.models.ckpt_dir, "diffusion_pytorch_model.safetensors")
             DiffusionBackend.model = DiffusionBackend._build_and_setup_single_model(
                 args, 

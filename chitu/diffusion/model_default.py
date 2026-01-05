@@ -20,6 +20,7 @@ class WanModelDefaults:
     eps: float = 1e-6
 
 
+# FIXME：merge with wan21
 @dataclass(frozen=True)
 class Wan22ModelDefaults:
     """Wan2.2 Model 的默认超参常量池（与 __init__ 默认值保持同步）"""

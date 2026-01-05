@@ -10,8 +10,6 @@ from diffusers.models.modeling_utils import ModelMixin
 from chitu.models.registry import ModelType, register_model, log_init_params
 from chitu.diffusion.model_default import WanModelDefaults
 from chitu.diffusion.modules.attention.wan_attention import flash_attention
-from chitu.diffusion.utils.wan_utils import rope_apply_with_cp
-from chitu.distributed.parallel_state import get_cp_group
 
 logger = getLogger(__name__)
 

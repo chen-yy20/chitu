@@ -71,7 +71,7 @@ class DiffusionUserRequest:
         self,
         request_id,
         params: DiffusionUserParams = None,
-        init_image: Optional[torch.Tensor] = None,  # for img2img
+        init_image: Optional[torch.Tensor] = None,  # for i2v
         # txt_emb = None,
         # img_emb = None,
         # latents = None,
