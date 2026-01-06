@@ -273,11 +273,11 @@ class Generator:
     
         # FIXME: reduce branch
         if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
-            if timestep >= DiffusionBackend.args.transformers.boundary * DiffusionBackend.args.transformers.num_train_timesteps:
-                noise_guidance_scale = DiffusionBackend.args.transformers.high_guide_scale
+            if timestep >= DiffusionBackend.args.models.transformer.boundary * DiffusionBackend.args.models.transformer.num_train_timesteps:
+                noise_guidance_scale = DiffusionBackend.args.models.transformer.high_guide_scale
                 model = DiffusionBackend.high_noise_model
             else:
-                noise_guidance_scale = DiffusionBackend.args.transformers.low_guide_scale
+                noise_guidance_scale = DiffusionBackend.args.models.transformer.low_guide_scale
                 model = DiffusionBackend.low_noise_model
         else:
             model = DiffusionBackend.model

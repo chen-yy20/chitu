@@ -11,18 +11,16 @@
 Flash Attention建议用wheel安装：https://github.com/Dao-AILab/flash-attention/releases/tag/v2.7.1.post2
 
 ## Model Checkpoint
-目前的模型：Wan2.1-T2V-1.3B
+> Supported model-ids:
+> * Wan-AI/Wan2.1-T2V-1.3B
+> * Wan-AI/Wan2.1-T2V-14B
+> * Wan-AI/Wan2.2-T2V-A14B
 
 建议使用huggingface-cli安装，国内使用hf-mirror.
 
 ```
 HF_ENDPOINT=https://hf-mirror.com hf download <model-id> --local-dir ./ckpts
 ```
-
-> Supported model-ids:
-> * Wan-AI/Wan2.1-T2V-1.3B
-> * Wan-AI/Wan2.1-T2V-14B
-> * Wan-AI/Wan2.2-T2V-A14B
 
 # Run Demo
 **模型架构参数**(层数、注意力头数等)是静态的，在`chitu/config/models/Wan2.1-T2V-1.3B.yaml`中进行设置。
@@ -46,11 +44,9 @@ if [ $cp_size -eq 0 ]; then
     cp_size=1
 fi
 
+# 请自行调整
 # model="Wan2.1-T2V-1.3B"
 # ckpt_dir="/home/zhongrx/cyy/Wan2.1/Wan2.1-T2V-1.3B"
-
-model="Wan2.1-T2V-14B"
-ckpt_dir="/home/zhongrx/cyy/Wan2.1/Wan2.1-T2V-14B"
 
 ./script/srun_multi_node.sh 1 $num_gpus ./chitu/diffusion/test_generate.py models=$model models.ckpt_dir=$ckpt_dir \
     infer.diffusion.cp_size=$cp_size infer.diffusion.up_limit=2

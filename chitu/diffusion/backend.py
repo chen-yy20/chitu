@@ -137,9 +137,10 @@ class DiffusionBackend:
         logger.info(f"Building model with args: {args.transformer}")
 
         # # 从 args.transformer 构建正确的模型参数
-        if args.type in ["diff-wan", "diff-wan-22"]:
+        # if args.type in ["diff-wan", "diff-wan-22"]:
+        try:
             model_kwargs = args.transformer
-        else:
+        except:
             raise ValueError(f"Unsupported model type: {args.type}")
         
         # 创建模型实例
@@ -149,7 +150,7 @@ class DiffusionBackend:
     
     # hmx: refactored to support multi-part checkpoint loading
     @staticmethod
-    def _load_checkpoint(model, path, args):
+    def _load_checkpoint(model: torch.nn.Module, path: str, args: Any):
         """load multi-part checkpoint(*.safetensors) from a directory or a single file"""
         path = os.path.expanduser(path)
         
@@ -363,7 +364,7 @@ class DiffusionBackend:
     
     @staticmethod
     def _init_cache_manager():
-        # TODO
+        # TODO: Unified Feature Caching mechanism.
         pass
 
     @staticmethod

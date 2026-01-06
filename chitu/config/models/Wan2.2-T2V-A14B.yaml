@@ -1,5 +1,5 @@
 name: Wan2.2-T2V-A14B
-type: diff-wan-22
+type: diffusion-wan
 source: "https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B" # Just for displaying. No automatic download.
 ckpt_dir: null # Please override this in commond line with `models.ckpt_dir:<path>`.
 low_noise_checkpoint: "low_noise_model"
