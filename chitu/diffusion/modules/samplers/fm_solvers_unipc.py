@@ -719,8 +719,6 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         else:
             this_order = self.config.solver_order
         
-        print(f"debug: {this_order=} step_index={self.step_index}, solver_order={self.config.solver_order}, lower_order_nums={self.lower_order_nums}", flush=True)
-
         self.this_order = min(this_order,
                               self.lower_order_nums + 1)  # warmup for multistep
         assert self.this_order > 0

@@ -5,6 +5,7 @@
 import time
 import torch
 import torch.distributed as dist
+import tqdm
 import pickle
 from dataclasses import dataclass, field
 from enum import Enum
@@ -56,13 +57,12 @@ class DiffusionUserParams:
     seed: Optional[int] = None
     # 调度器参数
     sample_solver: str = "ddpm"
+    num_inference_steps: int = None
     # 其他参数
-    num_inference_steps: int = 50
-    guidance_scale: float = 7.5
-    sample_shift: float = 5.0,
+    save_dir: Optional[str] = "./output"  # 输出保存路径
     # clip_skip: int = 1
     # strength: float = 1.0  # for img2img
-    save_dir: Optional[str] = "./output"  # 输出保存路径
+    
 
 class DiffusionUserRequest:
     """用户请求封装"""
@@ -81,6 +81,12 @@ class DiffusionUserRequest:
         self.request_id = request_id
         self.params = params
         self.init_image = init_image
+        
+    def init_user_params(self, params: DiffusionUserParams):
+        if params.num_inference_steps is None:
+            params.num_inference_steps = DiffusionBackend.args.models.sampler.sample_steps
+        elif params.num_inference_steps != DiffusionBackend.args.models.sampler.sample_steps:
+            logger.warning(f"Denoising step of request {self.request_id} is {params.num_inference_steps}, but default setting is {DiffusionBackend.args.models.sampler.sample_steps}. Generation quality might be degraded.")
 
     def get_role(self):
         return self.params.role
@@ -132,9 +138,9 @@ class DiffusionTask:
         self.task_id = task_id
         self.task_type = DiffusionTaskType.TextEncode if task_type is None else task_type # T2V task is always text encode
         self.status = DiffusionTaskStatus.Pending
+        self.progress_bar = None
 
         self.req = req
-        self.do_cfg = req.params.guidance_scale > 0 if req is not None else False
         self.buffer = DiffusionTaskBuffer() if buffer is None else buffer
          # 系统信号数据
         self.signal_data = signal_data or {}
@@ -185,103 +191,6 @@ class DiffusionTask:
             return False
         return self.status == DiffusionTaskStatus.Running
 
-
-    def update_stage_and_buffer(self, tokens) -> bool:
-        """转换到下一个处理阶段并更新缓冲区
-        
-        Args:
-            tokens: 当前阶段的输出tokens/latents
-        
-        Returns:
-            bool: 是否需要继续调度（False表示已完成所有阶段）
-        """
-        if self.is_terminate_signal():
-            logger.debug(f"Terminate signal {self.task_id} processed")
-            self.status = DiffusionTaskStatus.Completed
-            return False
-        
-        has_img = self.req.init_image is not None
-        if self.status == DiffusionTaskStatus.Running:
-            self.status = DiffusionTaskStatus.Pending
-        else:
-            logger.warning(f"Task {self.task_id} - Status: {self.status}")
-        
-        logger.info(f"[Task] current stage: {self.task_type}")
-        
-        # 处理Text Encode阶段
-        if self.task_type == DiffusionTaskType.TextEncode:
-            if get_cfg_group().group_size == 1:
-                if self.buffer.text_embeddings is None:
-                    # 首次text encode (正向prompt)
-                    self.buffer.text_embeddings = tokens
-                    if self.do_cfg:
-                        # CFG模式需要第二次encode negative prompt
-                        return True
-                else:
-                    # 第二次text encode（仅CFG模式）
-                    if self.do_cfg:
-                        self.buffer.negative_embeddings = tokens
-            elif get_cfg_group().group_size == 2:
-                if get_cfg_group().rank_in_group == 0:
-                    self.buffer.text_embeddings = tokens
-                else:
-                    self.buffer.negative_embeddings = tokens
-                
-            # Text Encode完成，转换到下一阶段
-            self.task_type = DiffusionTaskType.VAEEncode if has_img else DiffusionTaskType.Denoise
-            
-            # 如果转换到Denoise阶段，初始化denoise相关参数
-            if self.task_type == DiffusionTaskType.Denoise:
-                self.buffer.current_step = 0
-                self.num_inference_steps = self.req.params.num_inference_steps
-                
-            logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
-            return True
-        
-        # 处理VAE Encode阶段
-        elif self.task_type == DiffusionTaskType.VAEEncode:
-            self.buffer.latents = tokens  # 保存编码后的latents
-            
-            # 转换到Denoise阶段
-            self.task_type = DiffusionTaskType.Denoise
-            
-            # 初始化denoise相关参数            
-            logger.debug(f"Task {self.task_id} transitioned to {self.task_type}")
-            return True
-        
-        # 处理Denoise阶段（关键：需要多次执行）
-        elif self.task_type == DiffusionTaskType.Denoise:
-            # 更新当前去噪后的latents
-            self.buffer.latents = tokens
-            self.buffer.current_step += 1
-            
-            logger.debug(f"Task {self.task_id} denoise step {self.buffer.current_step}/{self.num_inference_steps}")
-            
-            # 检查是否完成所有denoise步骤
-            if self.buffer.current_step >= self.num_inference_steps:
-                # 所有denoise步骤完成，转换到VAE Decode
-                self.task_type = DiffusionTaskType.VAEDecode
-                logger.debug(f"Task {self.task_id} completed denoising, transitioned to {self.task_type}")
-                return True
-            else:
-                # 还需要继续denoise，保持当前阶段但状态改为Pending等待下次调度
-                logger.debug(f"Task {self.task_id} continuing denoise step {self.buffer.current_step}/{self.num_inference_steps}")
-                return True
-        
-        # 处理VAE Decode阶段（最终阶段）
-        elif self.task_type == DiffusionTaskType.VAEDecode:
-            self.buffer.generated_image = tokens  # 保存最终生成的图像
-            logger.debug(f"Task {self.task_id} completed all stages")
-            self.status = DiffusionTaskStatus.Completed
-            return False  # 完成所有阶段，不需要继续调度
-        
-        # 未知阶段
-        else:
-            logger.error(f"Unknown task type: {self.task_type}")
-            self.status = DiffusionTaskStatus.Failed
-            return False
-
-
     def __repr__(self):
         return (
             f"DiffusionTask(id={self.task_id}, type={self.task_type}, "
@@ -298,7 +207,6 @@ class DiffusionTask:
                 'task_id': self.task_id,
                 'task_type': self.task_type,
                 'status': self.status,
-                'do_cfg': self.do_cfg,
                 'error_message': self.error_message,
                 'is_terminate_signal': self.is_terminate_signal(),
                 'signal_data': self.signal_data,  # 终止信号数据
@@ -315,8 +223,6 @@ class DiffusionTask:
                     'seed': self.req.params.seed,
                     'sample_solver': self.req.params.sample_solver,
                     'num_inference_steps': self.req.params.num_inference_steps,
-                    'guidance_scale': self.req.params.guidance_scale,
-                    'sample_shift': self.req.params.sample_shift,
                     'save_dir': self.req.params.save_dir,
                 }
             else:
@@ -415,7 +321,6 @@ class DiffusionTask:
             
             # 6. 恢复任务状态
             task.status = metadata['status']
-            task.do_cfg = metadata['do_cfg']
             task.error_message = metadata['error_message']
             
             logger.debug(f"Deserialized {'terminate signal' if task.is_terminate_signal() else 'task'} {task.task_id}")

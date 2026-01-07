@@ -176,11 +176,11 @@ def run_normal(args, timers):
             tokens += 1
             chitu_run()
 
-        print("GPU memory used : ", torch.cuda.memory_allocated())
         timers("overall").stop()
         t_end = time.time()
         logger.info(f"Tokens generate : {tokens}")
         logger.info(f"Time cost {t_end - t_start}")
+        
 
         for i, req in enumerate(reqs):
             logger.info(f"Response in rank {rank}: reqs[{i}].output={req.output}")

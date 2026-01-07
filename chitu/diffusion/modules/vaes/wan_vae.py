@@ -506,6 +506,9 @@ class WanVAE_(nn.Module):
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(dim, z_dim, dim_mult, num_res_blocks,
                                  attn_scales, self.temperal_upsample, dropout)
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     def forward(self, x):
         mu, log_var = self.encode(x)
@@ -611,7 +614,7 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
     # load checkpoint
     logging.info(f'loading {pretrained_path}')
     model.load_state_dict(
-        torch.load(pretrained_path, map_location=device), assign=True)
+        torch.load(pretrained_path, map_location=device, mmap=True), assign=True)
 
     return model
 
@@ -648,6 +651,7 @@ class WanVAE:
         """
         videos: A list of videos each with shape [C, T, H, W].
         """
+        self.scale = [s.to(self.model.device) for s in self.scale]
         with amp.autocast(device_type="cuda", dtype=self.dtype):
             return [
                 self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0)
@@ -655,6 +659,7 @@ class WanVAE:
             ]
 
     def decode(self, zs):
+        self.scale = [s.to(self.model.device) for s in self.scale]
         with amp.autocast(device_type="cuda", dtype=self.dtype):
             return [
                 self.model.decode(u.unsqueeze(0),

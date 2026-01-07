@@ -408,7 +408,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         super().__init__()
 
-        logger.info(f"Initializing WanModel with type: {model_type}")
+        # logger.info(f"Initializing WanModel with type: {model_type}")
 
         assert model_type in ['t2v', 'i2v', 'flf2v', 'vace']
         self.model_type = model_type
@@ -456,12 +456,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (self.dim % self.num_heads) == 0 and (self.dim // self.num_heads) % 2 == 0
-        d = self.dim // self.num_heads
-        self.freqs = torch.cat([
-            rope_params(1024, d - 4 * (d // 6)),
-            rope_params(1024, 2 * (d // 6)),
-            rope_params(1024, 2 * (d // 6))
-        ], dim=1)
+        self._freqs = None
 
         if model_type == 'i2v' or model_type == 'flf2v':
             self.img_emb = MLPProj(1280, self.dim, flf_pos_emb=model_type == 'flf2v')
@@ -469,6 +464,24 @@ class WanModel(ModelMixin, ConfigMixin):
         # initialize weights
         self.init_weights()
 
+    @property
+    def freqs(self):
+        """
+        Delay initializing `self.freqs` to make sure it is not on meta device
+        """
+        if self._freqs is None or self._freqs.is_meta:
+            # real current device
+            device = self.patch_embedding.weight.device
+            if device.type == 'meta':
+                return self._freqs # return if still meta device (should not happen)            
+            d = self.dim // self.num_heads
+            self._freqs = torch.cat([
+                rope_params(1024, d - 4 * (d // 6)),
+                rope_params(1024, 2 * (d // 6)),
+                rope_params(1024, 2 * (d // 6))
+            ], dim=1).to(device=device)
+            
+        return self._freqs
 
     def _single_input_preprocess(self, x, t, context, y):
         x = [x]
@@ -515,11 +528,6 @@ class WanModel(ModelMixin, ConfigMixin):
 
         if self.model_type == 'i2v' or self.model_type == 'flf2v':
             assert clip_fea is not None and y is not None
-        
-        # params
-        device = self.patch_embedding.weight.device
-        if self.freqs.device != device:
-            self.freqs = self.freqs.to(device)
 
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]

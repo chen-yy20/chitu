@@ -62,10 +62,9 @@ class InferConfig:
 
     @dataclass
     class DiffusionConfig:
-        denoising_steps: int = MISSING
-        guidance_scale: float = MISSING
         cp_size: int = MISSING
         up_limit: int = MISSING
+        low_memory: bool = MISSING # In low gpu memory mode, models will be offloaded to cpu and only loaded in needed stage. 
 
     diffusion: DiffusionConfig = MISSING
 

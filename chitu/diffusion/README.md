@@ -23,7 +23,7 @@ HF_ENDPOINT=https://hf-mirror.com hf download <model-id> --local-dir ./ckpts
 ```
 
 # Run Demo
-**模型架构参数**(层数、注意力头数等)是静态的，在`chitu/config/models/Wan2.1-T2V-1.3B.yaml`中进行设置。
+**模型架构参数**(层数、注意力头数等)是静态的，在`chitu/config/models/<diffusion-model>.yaml`中进行设置。
 
 **用户参数**(生成步数、形状等)是动态的，`Chitu`提供`DiffusionUserParams`以请求为单位进行设置。
 
@@ -51,3 +51,7 @@ fi
 ./script/srun_multi_node.sh 1 $num_gpus ./chitu/diffusion/test_generate.py models=$model models.ckpt_dir=$ckpt_dir \
     infer.diffusion.cp_size=$cp_size infer.diffusion.up_limit=2
 ```
+
+# 魔法参数！
+
+* `infer.diffusion.low-memory=true`: 低显存模式，系统允许分阶段offload。告别OOM，有卡就能跑！

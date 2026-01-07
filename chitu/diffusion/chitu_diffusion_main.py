@@ -191,7 +191,7 @@ def chitu_init(args, logging_level=None):
 @torch.inference_mode()
 def chitu_run_main_rank():
     task_ids = Backend.scheduler.schedule()
-    logger.info(f"[Scheduler] scheduled task_ids={task_ids}")
+    # logger.info(f"[Scheduler] scheduled task_ids={task_ids}")
     
     # 再基于task_ids给出打包
     if not DiffusionTaskPool.all_finished():

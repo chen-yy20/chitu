@@ -11,6 +11,7 @@ from functools import partial
 from contextlib import contextmanager
 import numpy as np
 import torch.amp as amp
+from tqdm import tqdm
 
 from logging import getLogger
 from chitu.global_vars import get_global_args, get_slot_handle, get_timers
@@ -36,6 +37,30 @@ from chitu.diffusion.utils.shared_utils import SequencePadder
 
 
 logger = getLogger(__name__)
+
+from contextlib import contextmanager
+
+@contextmanager
+def device_scope(model: torch.nn.Module):
+    # low_mem = getattr(DiffusionBackend.args.infer.diffusion, "low_memory", False)
+    original_device = None
+    
+    if model is not None and torch.cuda.is_available():
+        # 记录原始设备
+        original_device = next(model.parameters()).device if len(list(model.parameters())) > 0 else None
+        model.to(torch.cuda.current_device())
+    
+    try:
+        DiffusionBackend.memory_used(f"Loaded model to {torch.cuda.current_device()}")
+        yield model
+    finally:
+        if model is not None:
+            # 恢复到原始设备，而不是强制CPU
+            target_device = original_device if original_device is not None else "cpu"
+            model.to(target_device)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            DiffusionBackend.memory_used(f"Offloaded model to {target_device}")
 
 class DiffusionTaskDispatcher(TasksDispatcher):
     def __init__(self):
@@ -163,19 +188,8 @@ class ContextParallelDispatcher():
                 return x
             return wrapped_compute
 
-        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
-            # pack two models
-            DiffusionBackend.high_noise_model.model_compute = create_wrapped_forward(DiffusionBackend.high_noise_model)
-            DiffusionBackend.low_noise_model.model_compute = create_wrapped_forward(DiffusionBackend.low_noise_model)
-        elif DiffusionBackend.args.models.name in ["Wan2.1-T2V-1.3B"]:
-            DiffusionBackend.model.model_compute = create_wrapped_forward(DiffusionBackend.model)
-        else:
-            raise NotImplementedError("Unsupported model for CP.")
-
-        # DiffusionBackend.model.rope_apply = partial(rope_apply_with_cp, 
-        #                                             cp_size=self.group.group_size, 
-        #                                             cp_rank=self.rank_in_group)
-            
+        for model in DiffusionBackend.model_pool:
+            model.model_compute = create_wrapped_forward(model)
 
 class Generator:
     @classmethod
@@ -238,9 +252,7 @@ class Generator:
         
             
     def text_encode_step(self, task: DiffusionTask) -> torch.Tensor:
-        # TODO: 支持offload和t5 cpu
         # payload 是本次task需要处理的数据的抽象
-        device = torch.cuda.current_device()
         if self.cfg_size == 1:
             if task.buffer.text_embeddings is None:
                 payload = task.req.get_prompt()
@@ -253,7 +265,10 @@ class Generator:
                 payload = task.req.get_n_prompt()
 
         logger.info(f"[text_encode_step] task_id={task.task_id}, txt={payload}")
-        out = DiffusionBackend.text_encoder(payload, device=device)
+        
+        with device_scope(DiffusionBackend.text_encoder.model):        
+            out = DiffusionBackend.text_encoder(payload, torch.cuda.current_device())
+            
         logger.info(f"[text_encode_step] context shape: {out.shape}")
         return out
     
@@ -263,34 +278,19 @@ class Generator:
     @amp.autocast(device_type="cuda", dtype=torch.bfloat16)
     @torch.no_grad()
     def denoise_step(self, task: DiffusionTask):
-        logger.info(f"Step {task.buffer.current_step}: Enter Denoise Stage!")
-
         assert task.buffer.latents is not None and task.buffer.timesteps is not None
 
         latent_model_input = task.buffer.latents
         timestep = task.buffer.timesteps[task.buffer.current_step]
 
-    
-        # FIXME: reduce branch
-        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
-            if timestep >= DiffusionBackend.args.models.transformer.boundary * DiffusionBackend.args.models.transformer.num_train_timesteps:
-                noise_guidance_scale = DiffusionBackend.args.models.transformer.high_guide_scale
-                model = DiffusionBackend.high_noise_model
-            else:
-                noise_guidance_scale = DiffusionBackend.args.models.transformer.low_guide_scale
-                model = DiffusionBackend.low_noise_model
-        else:
-            model = DiffusionBackend.model
-            noise_guidance_scale = task.req.params.guidance_scale
-
-        if task.do_cfg: # Wan的cfg是做两次
+        if DiffusionBackend.guidance_scale > 0: # Wan的cfg是做两次
             if self.cfg_size == 2:
                 if get_cfg_group().rank_in_group == 0:
                     context = task.buffer.text_embeddings
                 else:
                     context = task.buffer.negative_embeddings
 
-                cfg_partial_noise_pred = model(
+                cfg_partial_noise_pred = DiffusionBackend.active_model(
                     latent_model_input,
                     t=timestep,
                     context=context,
@@ -298,22 +298,22 @@ class Generator:
                 )
                 noise_pred_cond, noise_pred_uncond = self.cfg_dispatcher.all_gather_cfg_noise_preds(cfg_partial_noise_pred)
             else:
-                noise_pred_cond = model(
+                noise_pred_cond = DiffusionBackend.active_model(
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.text_embeddings,
                     seq_len=task.buffer.seq_len
                 )
-                noise_pred_uncond = model(
+                noise_pred_uncond = DiffusionBackend.active_model(
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.negative_embeddings,
                     seq_len=task.buffer.seq_len
                 )
             noise_pred = noise_pred_uncond + \
-                noise_guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                DiffusionBackend.guidance_scale * (noise_pred_cond - noise_pred_uncond)
         else:
-            noise_pred = model(
+            noise_pred = DiffusionBackend.active_model(
                 latent_model_input,
                 t=timestep,
                 context=task.buffer.text_embeddings,
@@ -328,24 +328,24 @@ class Generator:
             generator=task.buffer.seed_g
         )[0].squeeze(0)
 
-        logger.info(f"[Denoise Step] {task.buffer.current_step}/"
-                    f"{task.req.params.num_inference_steps} "
-                    f"timestep: {timestep} latents shape: {sampled_latents.shape}, {sampled_latents.dtype=}")
+        # logger.info(f"[Denoise Step] {task.buffer.current_step}/"
+        #             f"{task.req.params.num_inference_steps} "
+        #             f"timestep: {timestep} latents shape: {sampled_latents.shape}, {sampled_latents.dtype=}")
 
         return sampled_latents
 
         
-
     
     def vae_decode_step(self, task: DiffusionTask):
-        payload = [task.buffer.latents]
-        if torch.distributed.get_rank() == 0:
+        target_decode_device = 0 # TODO: Flexible vae device
+        if torch.distributed.get_rank() == target_decode_device:
+            payload = [task.buffer.latents]
             logger.info(f"Step {task.buffer.current_step}: Enter VAE Decode Stage!")
-            video = DiffusionBackend.vae.decode(payload)[0]
+            with device_scope(DiffusionBackend.vae.model):
+                video = DiffusionBackend.vae.decode(payload)[0]
             self._save_image(task, video)
             return video
         return None
-
 
 
     # TODO: CPU/GPU overlap
@@ -363,8 +363,6 @@ class Generator:
             normalize=True,
             value_range=(-1, 1))
         logger.info(f"[Succeed] Task {task.task_id} video saved to {save_path}")
-
-        
         
     def _pre_denoising(self, task: DiffusionTask):
         """
@@ -403,21 +401,21 @@ class Generator:
         # Prepare Solver and Timestep on main rank
         if task.req.params.sample_solver == 'unipc': # 求解器
             sample_scheduler = FlowUniPCMultistepScheduler(
-                num_train_timesteps=1000,
+                num_train_timesteps=DiffusionBackend.args.models.sampler.num_train_timesteps,
                 shift=1,
                 use_dynamic_shifting=False)
             sample_scheduler.set_timesteps(
                 task.req.params.num_inference_steps, 
                 device=device,
-                shift=task.req.params.sample_shift
+                shift=DiffusionBackend.args.models.sampler.sample_shift
                 )
             timesteps = sample_scheduler.timesteps
         elif task.req.params.sample_solver == 'dpm++':
             sample_scheduler = FlowDPMSolverMultistepScheduler(
-                num_train_timesteps=1000, 
+                num_train_timesteps=DiffusionBackend.args.models.sampler.num_train_timesteps, 
                 shift=1,
                 use_dynamic_shifting=False)
-            sampling_sigmas = get_sampling_sigmas(task.req.params.num_inference_steps, task.req.params.sample_shift)
+            sampling_sigmas = get_sampling_sigmas(task.req.params.num_inference_steps, DiffusionBackend.args.models.sampler.sample_shift)
             timesteps, _ = retrieve_timesteps(
                 sample_scheduler,
                 device=device,
@@ -431,38 +429,38 @@ class Generator:
         task.buffer.timesteps = timesteps
         task.buffer.seq_len = seq_len
         
-        # FIXME: Reduce specified branch
-        if DiffusionBackend.args.models.name in ["Wan2.2-T2V-A14B"]:
-            DiffusionBackend.low_noise_model.to(device)
-            DiffusionBackend.high_noise_model.to(device)    
-        else:
-            DiffusionBackend.model.to(device)
+        DiffusionBackend.switch_active_model(flush=True)
 
-        logger.info(f"[Pre Denoise] Init {latents.shape=} {timesteps=}")
+        # logger.info(f"[Pre Denoise] Init {latents.shape=} {timesteps=}")
 
 
     def _update_task_stage_and_buffer(self, task: DiffusionTask, tokens: torch.Tensor):
+
+        is_main_process = dist.get_rank() == 0
         has_img = task.req.init_image is not None
+        
         if task.status == DiffusionTaskStatus.Running:
             task.status = DiffusionTaskStatus.Pending
-        else:
+        elif is_main_process:
             logger.warning(f"Task {task.task_id} - Status: {task.status}")
-        
-        logger.info(f"[Task] current stage: {task.task_type}")
         
         # 处理Text Encode阶段
         if task.task_type == DiffusionTaskType.TextEncode:
+            if is_main_process:
+                logger.info(f"[Task] current stage: {task.task_type}")
+                
             if self.cfg_size == 1:
                 if task.buffer.text_embeddings is None:
                     # 首次text encode (正向prompt)
                     task.buffer.text_embeddings = tokens
-                    if task.do_cfg:
+                    if DiffusionBackend.do_cfg:
                         # CFG模式需要第二次encode negative prompt
                         return True
                 else:
                     # 第二次text encode（仅CFG模式）
-                    if task.do_cfg:
+                    if DiffusionBackend.do_cfg:
                         task.buffer.negative_embeddings = tokens
+
             elif self.cfg_size == 2:
                 if get_cfg_group().rank_in_group == 0:
                     task.buffer.text_embeddings = tokens
@@ -479,52 +477,92 @@ class Generator:
             # 如果转换到Denoise阶段，初始化denoise相关参数
             if task.task_type == DiffusionTaskType.Denoise:
                 task.buffer.current_step = 0
-                task.num_inference_steps = task.req.params.num_inference_steps
                 
-            logger.debug(f"Task {task.task_id} transitioned to {task.task_type}")
+            if is_main_process:
+                logger.debug(f"Task {task.task_id} transitioned to {task.task_type}")
             return True
         
         # 处理VAE Encode阶段
         elif task.task_type == DiffusionTaskType.VAEEncode:
+            if is_main_process:
+                logger.info(f"[Task] current stage: {task.task_type}")
             task.buffer.latents = tokens  # 保存编码后的latents
             
             # 转换到Denoise阶段
             task.task_type = DiffusionTaskType.Denoise
             
-            # 初始化denoise相关参数            
-            logger.debug(f"Task {task.task_id} transitioned to {task.task_type}")
+            if is_main_process:
+                logger.debug(f"Task {task.task_id} transitioned to {task.task_type}")
             return True
         
         # 处理Denoise阶段（关键：需要多次执行）
         elif task.task_type == DiffusionTaskType.Denoise:
+            # 只在主进程的开始denoise时显示阶段信息和初始化进度条
+            if task.buffer.current_step == 0:
+                if is_main_process:
+                    logger.info(f"[Task] current stage: {task.task_type}")
+                    # 将进度条作为task的属性
+                    task.progress_bar = tqdm(
+                        total=task.req.params.num_inference_steps,
+                        desc=f"Task {task.task_id} Denoising",
+                        unit="steps",
+                        dynamic_ncols=True,  # 自适应终端宽度
+                        leave=True  # 保持进度条显示
+                    )
+            
             # 更新当前去噪后的latents
             task.buffer.latents = tokens
             task.buffer.current_step += 1
             
-            logger.debug(f"Task {task.task_id} denoise step {task.buffer.current_step}/{task.num_inference_steps}")
-            
+            # 主进程更新进度条
+            # 主进程更新进度条
+            if is_main_process and hasattr(task, 'progress_bar') and task.progress_bar is not None:
+                task.progress_bar.update(1)
+                task.progress_bar.refresh()  # 强制刷新显示
+
             # 检查是否完成所有denoise步骤
-            if task.buffer.current_step >= task.num_inference_steps:
+            if task.buffer.current_step >= task.req.params.num_inference_steps:
+                # 主进程关闭进度条
+                if is_main_process and hasattr(task, 'progress_bar') and task.progress_bar is not None:
+                    task.progress_bar.close()
+                    task.progress_bar = None
+
                 # 所有denoise步骤完成，转换到VAE Decode
                 task.task_type = DiffusionTaskType.VAEDecode
-                logger.debug(f"Task {task.task_id} completed denoising, transitioned to {task.task_type}")
+                if is_main_process:
+                    logger.debug(f"Task {task.task_id} completed denoising, transitioned to {task.task_type}")
                 return True
+            elif DiffusionBackend.boundary is not None and task.buffer.current_step >= DiffusionBackend.boundary * task.req.params.num_inference_steps:
+                # 检查是否需要切换模型
+                DiffusionBackend.switch_active_model(flush=False)
             else:
                 # 还需要继续denoise，保持当前阶段但状态改为Pending等待下次调度
-                logger.debug(f"Task {task.task_id} continuing denoise step {task.buffer.current_step}/{task.num_inference_steps}")
+                if is_main_process:
+                    logger.debug(f"Task {task.task_id} continuing denoise")
                 return True
         
         # 处理VAE Decode阶段（最终阶段）
         elif task.task_type == DiffusionTaskType.VAEDecode:
+            if is_main_process:
+                logger.info(f"[Task] current stage: {task.task_type}")
+                # 确保进度条被正确关闭
+                if hasattr(task, 'progress_bar') and task.progress_bar is not None:
+                    task.progress_bar.close()
+                    task.progress_bar = None
+                    
             task.buffer.generated_image = tokens  # 保存最终生成的图像
-            logger.debug(f"Task {task.task_id} completed all stages")
+            if is_main_process:
+                logger.debug(f"Task {task.task_id} completed all stages")
             task.status = DiffusionTaskStatus.Completed
             self.current_task = None
             return False  # 完成所有阶段，不需要继续调度
         
         # 未知阶段
         else:
-            logger.error(f"Unknown task type: {task.task_type}")
+            if is_main_process:
+                if self.progress_bar:
+                    self.progress_bar.close()
+                logger.error(f"Unknown task type: {task.task_type}")
             task.req.finish_reason = "error"
             task.status = DiffusionTaskStatus.Failed
             return False
