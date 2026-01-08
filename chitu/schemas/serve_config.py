@@ -271,6 +271,19 @@ class StaticConfig:
 
 
 @dataclass
+class CacheConfig:
+    """TeaCache configuration"""
+    enabled: bool = False
+    teacache_thresh: float = 0.2
+    use_ret_steps: bool = False
+    sample_steps: int = 50
+    task: str = "t2v"  # t2v or i2v
+    model: str = "wan2.1-1.3B"
+    enable_cfg_separate_cache: bool = True
+    max_cache_size: int = 100
+
+
+@dataclass
 class ServeConfig:
     serve: ServeAddrConfig = field(default_factory=ServeAddrConfig)
     models: Any = MISSING
@@ -281,6 +294,7 @@ class ServeConfig:
     dp_config: DpConfig = field(default_factory=DpConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
     quant: Optional[str] = MISSING
     dtype: Optional[str] = MISSING  # Legacy parameter. To be removed in the future.
     float_16bit_variant: str = MISSING

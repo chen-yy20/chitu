@@ -364,8 +364,56 @@ class DiffusionBackend:
     
     @staticmethod
     def _init_cache_manager():
-        # TODO: Unified Feature Caching mechanism.
-        pass
+        """
+        初始化缓存管理器
+        支持多种缓存策略（TeaCache等）
+        """
+        from chitu.diffusion.utils.teacache_utils import (
+            init_teacache,
+            TeaCacheConfig,
+        )
+        from chitu.diffusion.utils.cache_manage_utils import (
+            enable_cache_for_backend,
+        )
+        
+        # 从配置中读取缓存设置
+        cache_config_obj = getattr(DiffusionBackend.args, "cache", None)
+        if cache_config_obj is None:
+            logger.info("[CacheManager] Cache not enabled in config, skip initialization")
+            return
+        
+        # 检查是否启用缓存
+        if hasattr(cache_config_obj, "enabled") and not cache_config_obj.enabled:
+            logger.info("[CacheManager] Cache is disabled in config, skip initialization")
+            return
+        
+        # 从配置对象中读取参数（支持 StaticConfig 和普通对象）
+        def get_cache_attr(obj, attr, default):
+            if hasattr(obj, attr):
+                return getattr(obj, attr)
+            elif hasattr(obj, "get"):
+                return obj.get(attr, default)
+            elif isinstance(obj, dict):
+                return obj.get(attr, default)
+            return default
+        
+        # 初始化TeaCache
+        cache_config = TeaCacheConfig(
+            enabled=get_cache_attr(cache_config_obj, "enabled", True),
+            teacache_thresh=get_cache_attr(cache_config_obj, "teacache_thresh", 0.2),
+            use_ret_steps=get_cache_attr(cache_config_obj, "use_ret_steps", False),
+            sample_steps=get_cache_attr(cache_config_obj, "sample_steps", 50),
+            task=get_cache_attr(cache_config_obj, "task", "t2v"),
+            model=get_cache_attr(cache_config_obj, "model", "wan2.1-1.3B"),
+            enable_cfg_separate_cache=get_cache_attr(cache_config_obj, "enable_cfg_separate_cache", True),
+            max_cache_size=get_cache_attr(cache_config_obj, "max_cache_size", 100),
+        )
+        
+        init_teacache(cache_config)
+        
+        # 在模型初始化后启用缓存
+        # 注意：这里需要在模型构建完成后调用 enable_cache_for_backend()
+        logger.info("[CacheManager] Cache manager initialized")
 
     @staticmethod
     def _init_attention_backend(args):
@@ -489,6 +537,16 @@ class DiffusionBackend:
         rope_impl = DiffusionBackend._get_rope_implementation(args)
        
         DiffusionBackend._build_and_setup_model(args, attn_backend, rope_impl)
+
+        # 初始化缓存管理器（如果启用）
+        DiffusionBackend._init_cache_manager()
+        
+        # 为模型启用缓存（如果已初始化）
+        try:
+            from chitu.diffusion.utils.cache_manage_utils import enable_cache_for_backend
+            enable_cache_for_backend()
+        except Exception as e:
+            logger.warning(f"[CacheManager] Failed to enable cache for backend: {e}")
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         logger.info(

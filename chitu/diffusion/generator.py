@@ -33,6 +33,10 @@ from chitu.diffusion.modules.samplers.fm_solvers import (
 from chitu.diffusion.modules.samplers.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from chitu.diffusion.utils.wan_utils import cache_video
 from chitu.diffusion.utils.shared_utils import SequencePadder
+from chitu.diffusion.utils.cache_manage_utils import (
+    get_cache_manager,
+    clear_cache_on_new_task,
+)
 
 
 logger = getLogger(__name__)
@@ -205,6 +209,8 @@ class Generator:
         if self.current_task is None: # 生成的最开始，将任务分发到workers
             task_type, task = DiffusionTaskDispatcher().dispatch_metadata(task)
             self.current_task = task
+            # 新任务开始时清空缓存
+            clear_cache_on_new_task()
         else:
             task = self.current_task # 接续当前任务
 
@@ -294,7 +300,7 @@ class Generator:
                     latent_model_input,
                     t=timestep,
                     context=context,
-                    seq_len=task.buffer.seq_len
+                    seq_len=task.buffer.seq_len,
                 )
                 noise_pred_cond, noise_pred_uncond = self.cfg_dispatcher.all_gather_cfg_noise_preds(cfg_partial_noise_pred)
             else:
@@ -302,13 +308,13 @@ class Generator:
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.text_embeddings,
-                    seq_len=task.buffer.seq_len
+                    seq_len=task.buffer.seq_len,
                 )
                 noise_pred_uncond = model(
                     latent_model_input,
                     t=timestep,
                     context=task.buffer.negative_embeddings,
-                    seq_len=task.buffer.seq_len
+                    seq_len=task.buffer.seq_len,
                 )
             noise_pred = noise_pred_uncond + \
                 noise_guidance_scale * (noise_pred_cond - noise_pred_uncond)
@@ -317,7 +323,7 @@ class Generator:
                 latent_model_input,
                 t=timestep,
                 context=task.buffer.text_embeddings,
-                seq_len=task.buffer.seq_len
+                seq_len=task.buffer.seq_len,
             )
 
         sampled_latents = task.buffer.sampler.step(
@@ -328,9 +334,35 @@ class Generator:
             generator=task.buffer.seed_g
         )[0].squeeze(0)
 
+        # 更新TeaCache的步骤计数器（在每个去噪步骤完成后）
+        # 注意：cnt表示去噪步骤（timestep）的计数，不是CFG调用的计数
+        # 在CFG并行模式下，condition和uncondition是并行计算的，属于同一个timestep
+        # 所以cnt应该在denoise_step完成后更新一次
+        from chitu.diffusion.utils.cache_manage_utils import get_cache_manager
+        manager = get_cache_manager()
+        strategy = manager.get_active_strategy()
+        if strategy is not None and hasattr(strategy, 'increment_step'):
+            # 注意：在CFG并行模式下，rank 0和rank 1是不同进程，各自有独立的策略实例
+            # 所以每个rank都需要更新自己的cnt计数器
+            # cnt表示去噪步骤数，每个timestep完成后都应该递增
+            strategy.increment_step()
+
         logger.info(f"[Denoise Step] {task.buffer.current_step}/"
                     f"{task.req.params.num_inference_steps} "
                     f"timestep: {timestep} latents shape: {sampled_latents.shape}, {sampled_latents.dtype=}")
+        
+        # 输出缓存统计信息（如果启用了缓存）
+        from chitu.diffusion.utils.cache_manage_utils import get_cache_manager
+        manager = get_cache_manager()
+        strategy = manager.get_active_strategy()
+        if strategy is not None and strategy.config.enabled:
+            stats = strategy.get_stats()
+            total = stats.get("hits", 0) + stats.get("misses", 0)
+            if total > 0:
+                hit_rate = stats.get("hit_rate", 0.0)
+                logger.info(f"[TeaCache Stats] Step {task.buffer.current_step}: "
+                           f"hits={stats.get('hits', 0)}, misses={stats.get('misses', 0)}, "
+                           f"stores={stats.get('stores', 0)}, hit_rate={hit_rate:.2%}")
 
         return sampled_latents
 
@@ -518,6 +550,20 @@ class Generator:
         elif task.task_type == DiffusionTaskType.VAEDecode:
             task.buffer.generated_image = tokens  # 保存最终生成的图像
             logger.debug(f"Task {task.task_id} completed all stages")
+            
+            # 输出最终的缓存统计信息
+            manager = get_cache_manager()
+            strategy = manager.get_active_strategy()
+            if strategy is not None and strategy.config.enabled:
+                stats = strategy.get_stats()
+                total = stats.get("hits", 0) + stats.get("misses", 0)
+                if total > 0:
+                    hit_rate = stats.get("hit_rate", 0.0)
+                    logger.info(f"[TeaCache Final Stats] Task {task.task_id}: "
+                               f"hits={stats.get('hits', 0)}, misses={stats.get('misses', 0)}, "
+                               f"stores={stats.get('stores', 0)}, hit_rate={hit_rate:.2%}, "
+                               f"total_ops={total}")
+            
             task.status = DiffusionTaskStatus.Completed
             self.current_task = None
             return False  # 完成所有阶段，不需要继续调度
