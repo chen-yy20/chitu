@@ -103,6 +103,8 @@ class CommGroup:
         self.rank_in_group = self.rank_list.index(global_rank)
         self.group_size = len(self.rank_list)
         self.moe_comm_group = None
+        self.p2p_ops = []
+        self.p2p_reqs= None
 
     @property
     def next_rank(self):
@@ -298,6 +300,40 @@ class CommGroup:
         )
 
         return list(zip(ip_list, port_dp_list, port_pp_list))
+    
+    # ==================== For Diffusion Ring Attention =================
+    def p2p_isend(self, tensor: torch.Tensor, dst: int):
+        # logger.info(f"R{self.global_rank}| send to {self.rank_list[dst]}")
+        send_op = torch.distributed.P2POp(torch.distributed.isend, tensor, self.rank_list[dst], self.gpu_group)
+        self.p2p_ops.append(send_op)
+
+    def p2p_irecv(self, size: torch.Size, dtype: torch.dtype, src: int):
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        # logger.info(f"R{self.global_rank}| recv from {self.rank_list[src]}")
+        recv_op = torch.distributed.P2POp(torch.distributed.irecv, tensor, self.rank_list[src], self.gpu_group)
+        self.p2p_ops.append(recv_op)
+        return tensor
+
+    # @toolbox.timer.torch_function_decorator("p2p_commit")
+    def p2p_commit(self):
+        assert self.p2p_reqs is None
+        self.p2p_reqs = torch.distributed.batch_isend_irecv(self.p2p_ops)
+
+    # @toolbox.timer.torch_function_decorator("p2p_wait")
+    def p2p_wait(self):
+        for req in self.p2p_reqs:
+            req.wait()
+        self.p2p_ops.clear()
+        self.p2p_reqs = None
+
+    def all_to_all(self, input_: torch.Tensor, scatter_dim: int = 2, gather_dim: int = 1) -> torch.Tensor:
+        world_size = self.group_size
+        if world_size == 1:
+            return input_
+        input_list = [t.contiguous() for t in torch.tensor_split(input_, world_size, scatter_dim)]
+        output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
+        torch.distributed.all_to_all(output_list, input_list, group=self.gpu_group)
+        return torch.cat(output_list, dim=gather_dim).contiguous()
 
     def destroy(self):
         torch.distributed.destroy_process_group(self.gpu_group)

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 
 import torch
 from logging import getLogger
@@ -304,3 +304,123 @@ def destroy_parallel_groups():
     get_dp_group().destroy()
     # Currently we don't destroy ep_group as it is a copy of tp/dp
     # get_ep_group().destroy()
+
+
+# CFG and Context Parallelism support for diffusion models
+_CP_GROUP: Optional[CommGroup] = None
+_CFG_GROUP: Optional[CommGroup] = None
+_UP_GROUP_DICT: Optional[Dict[int, CommGroup]] = None
+
+def get_cp_group() -> CommGroup:
+    return get_global_var("_CP_GROUP")
+
+def get_cfg_group() -> CommGroup:
+    return get_global_var("_CFG_GROUP")
+
+def get_up_group(size: int) -> CommGroup:
+    global _UP_GROUP_DICT
+    if _UP_GROUP_DICT is None or size not in _UP_GROUP_DICT:
+        raise ValueError(f"UP group of size {size} not initialized.")
+    return _UP_GROUP_DICT[size]
+
+def initialize_cfg_group(cfg_size: int, rank: int, local_rank: int, world_size: int):
+    global _CFG_GROUP
+    assert _CFG_GROUP is None
+    
+    if cfg_size == 1:
+        # No CFG parallelism
+        _CFG_GROUP = CommGroup([[idx] for idx in range(world_size)], rank, local_rank)
+    elif cfg_size == 2:
+        # CFG parallelism with pairs
+        assert world_size % 2 == 0, "World size must be even for CFG parallelism"
+        half_size = world_size // 2
+        rank_list = []
+        for i in range(half_size):
+            rank_list.append([i, i + half_size])
+        _CFG_GROUP = CommGroup(rank_list, rank, local_rank)
+    else:
+        raise ValueError("CFG size can only be 1 or 2")
+
+def initialize_cp_group(cp_size: int, cfg_size: int, rank: int, local_rank: int, world_size: int):
+    global _CP_GROUP
+    assert _CP_GROUP is None
+    
+    if cfg_size == 2:
+        # With CFG parallelism
+        half_size = world_size // 2
+        rank_list = [
+            list(range(0, half_size)),           # First half
+            list(range(half_size, world_size))   # Second half
+        ]
+    else:
+        # No CFG parallelism - all ranks in single group
+        rank_list = [list(range(world_size))]
+    
+    _CP_GROUP = CommGroup(rank_list, rank, local_rank)
+
+def initialize_up_groups(up_sizes: List[int], up_limit: int, cfg_size: int, rank: int, local_rank: int, world_size: int):
+    global _UP_GROUP_DICT
+    assert _UP_GROUP_DICT is None
+    
+    _UP_GROUP_DICT = {}
+    
+    # Get CP group size
+    cp_group = get_cp_group()
+    cp_group_size = cp_group.group_size
+    
+    # Get CP group ranks
+    if cfg_size == 2:
+        half_size = world_size // 2
+        cp_group_ranks = [
+            list(range(0, half_size)),
+            list(range(half_size, world_size))
+        ]
+    else:
+        cp_group_ranks = [list(range(world_size))]
+    
+    for up_size in up_sizes:
+        if cp_group_size % up_size != 0:
+            continue
+            
+        if up_size > up_limit:
+            continue
+            
+        rank_list = []
+        for cp_ranks in cp_group_ranks:
+            for i in range(0, len(cp_ranks), up_size):
+                group = cp_ranks[i:i+up_size]
+                if group:
+                    rank_list.append(group)
+        
+        if rank_list:
+            _UP_GROUP_DICT[up_size] = CommGroup(rank_list, rank, local_rank)
+
+def initialize_diffusion_parallel_groups(
+    cfg_size: int,
+    cp_size: int,
+    up_limit: int = 8,
+):
+    global _PARALLEL_GROUPS_INITIALIZED
+    assert not _PARALLEL_GROUPS_INITIALIZED
+    
+    logger.info(
+        f"initialize_diffusion_parallel_groups: {cfg_size=}, {cp_size=}, {up_limit=}"
+    )
+    
+    rank = torch.distributed.get_rank()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = torch.distributed.get_world_size()
+    
+    # Initialize groups in order
+    initialize_world_group(rank, local_rank, world_size)
+    initialize_cfg_group(cfg_size, rank, local_rank, world_size)
+    initialize_cp_group(cp_size, cfg_size, rank, local_rank, world_size)
+    up_sizes = [up_limit] # TODO: More up sizes to support DiTango Support
+    initialize_up_groups(up_sizes, up_limit, cfg_size, rank, local_rank, world_size)
+    
+    # Debug logging
+    if rank == 0:
+        logger.info(f"CFG groups initialized: {get_cfg_group().rank_list}")
+        logger.info(f"CP groups initialized: {get_cp_group().rank_list}")
+        for size, up_group in _UP_GROUP_DICT.items():
+            logger.info(f"UP group size {size}: {up_group.rank_list}")

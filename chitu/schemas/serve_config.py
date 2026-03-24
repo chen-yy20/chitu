@@ -60,6 +60,14 @@ class InferConfig:
     moe: MoEConfig = MISSING
     mtp_size: int = MISSING
 
+    @dataclass
+    class DiffusionConfig:
+        cp_size: int = MISSING
+        up_limit: int = MISSING
+        low_memory: bool = MISSING # In low gpu memory mode, models will be offloaded to cpu and only loaded in needed stage. 
+
+    diffusion: DiffusionConfig = MISSING
+
 
 @dataclass
 class RequestConfig:

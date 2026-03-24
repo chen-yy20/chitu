@@ -435,6 +435,7 @@ def check_checkpoint_path(args):
 
 def chitu_init(args):
     debug = os.getenv("CHITU_DEBUG", "0") == "1"
+    debug = 1 # FIXME: force debug mode for development
 
     if (
         is_nvidia()

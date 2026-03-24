@@ -18,6 +18,9 @@ class ModelType(str, Enum):
     HF_MIXTRAL = "hf-mixtral"
     LLAMA = "llama"
     HF_QWEN3_NEXT = "hf-qwen3-next"
+    # Diffusion models
+    WAN_DIT="diffusion-wan"
+    FLUX2_KLEIN="flux2-klein"
 
 
 def register_model(name: str | ModelType):
@@ -40,3 +43,13 @@ def get_model_class(name: str | ModelType):
             f"Available models: {list(_model_registry.keys())}"
         )
     return model_class
+
+def log_init_params(cls):
+    original_init = cls.__init__
+    def new_init(self, *args, **kwargs):
+        print(f"Initializing {cls.__name__}")
+        print("Args:", args)
+        print("Kwargs:", kwargs)
+        return original_init(self, *args, **kwargs)
+    cls.__init__ = new_init
+    return cls
