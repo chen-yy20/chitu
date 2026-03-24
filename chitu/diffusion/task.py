@@ -121,6 +121,11 @@ class DiffusionTaskBuffer:
     # VAE Decode buffers
     generated_image: Optional[torch.Tensor] = field(default=None)
 
+    # FLUX2-specific buffers
+    ctx_ids: Optional[torch.Tensor] = field(default=None)
+    x_ids: Optional[torch.Tensor] = field(default=None)
+    guidance_vec: Optional[torch.Tensor] = field(default=None)
+
 class DiffusionTask:
     
     def __init__(
@@ -251,6 +256,12 @@ class DiffusionTask:
                     tensor_data['denoised_latents'] = self.buffer.denoised_latents.detach().clone()
                 if self.buffer.generated_image is not None:
                     tensor_data['generated_image'] = self.buffer.generated_image.detach().clone()
+                if self.buffer.ctx_ids is not None:
+                    tensor_data['ctx_ids'] = self.buffer.ctx_ids.detach().clone()
+                if self.buffer.x_ids is not None:
+                    tensor_data['x_ids'] = self.buffer.x_ids.detach().clone()
+                if self.buffer.guidance_vec is not None:
+                    tensor_data['guidance_vec'] = self.buffer.guidance_vec.detach().clone()
             
             # 5. 打包所有数据
             full_data = {
@@ -309,6 +320,9 @@ class DiffusionTask:
                 buffer.latents = tensor_data.get('latents')
                 buffer.denoised_latents = tensor_data.get('denoised_latents')
                 buffer.generated_image = tensor_data.get('generated_image')
+                buffer.ctx_ids = tensor_data.get('ctx_ids')
+                buffer.x_ids = tensor_data.get('x_ids')
+                buffer.guidance_vec = tensor_data.get('guidance_vec')
             
             # 5. 重建任务对象
             task = DiffusionTask(

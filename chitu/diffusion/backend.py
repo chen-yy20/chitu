@@ -347,7 +347,10 @@ class DiffusionBackend:
         non_expert_data_parallel_size = 1 # TODO: support batch generation with data parallelism
 
         # FIXME: a better cfg worldsize decision
-        DiffusionBackend.do_cfg = all(x > 0 for x in args.models.sampler.guidance_scale)
+        if args.models.name in ["FLUX.2-klein-4B"]:
+            DiffusionBackend.do_cfg = False
+        else:
+            DiffusionBackend.do_cfg = all(x > 0 for x in args.models.sampler.guidance_scale)
         cfg_size = 2 if (world_size >= 2 and  DiffusionBackend.do_cfg) else 1
 
         up_limit = args.infer.diffusion.up_limit
@@ -417,6 +420,15 @@ class DiffusionBackend:
                     tokenizer_path=os.path.join(args.models.ckpt_dir, args.models.encoder.t5_tokenizer),
                 )
             logger.info(f"Initialized T5 encoder for {args.models.name}")
+        elif "FLUX" in args.models.name:
+            from chitu.diffusion.modules.encoders.qwen3 import Qwen3Embedder
+            logger.info(f"Initializing T5 encoder for {args.models.name}")
+
+            text_encoder = Qwen3Embedder(
+                    model_spec=args.models.encoder.ckpt_dir,
+                    device = init_device,
+                )
+            logger.info(f"Initialized T5 encoder for {args.models.name}")
         else:
             text_encoder = None
 
@@ -442,6 +454,15 @@ class DiffusionBackend:
                     device = init_device,
                 )
             logger.info(f"Initialized Wan VAE for {args.models.name}")
+        elif "FLUX" in args.models.name:
+            from chitu.diffusion.modules.vaes.flux2_vae import FLUX2VAE
+            logger.info(f"Initializing VAE for {args.models.name}")
+
+            vae = FLUX2VAE(
+                    vae_path=os.path.join(args.models.ckpt_dir, args.models.vae.checkpoint),
+                    device = init_device,
+                )
+            logger.info(f"Initialized VAE for {args.models.name}")
         else:
             vae = None
         return vae
@@ -513,6 +534,15 @@ class DiffusionBackend:
                 rope_impl
             )
             DiffusionBackend.model_pool = [high_noise_model, low_noise_model]
+        elif args.models.name in ["FLUX.2-klein-4B"]:
+            ckpt_path = os.path.join(args.models.ckpt_dir, "transformer/diffusion_pytorch_model.safetensors")
+            model = DiffusionBackend._build_and_setup_single_model(
+                args,
+                ckpt_path,
+                attn_backend,
+                rope_impl,
+            )
+            DiffusionBackend.model_pool.append(model)
         else:
             raise ValueError(f"Unsupported model name: {args.models.name}")
 

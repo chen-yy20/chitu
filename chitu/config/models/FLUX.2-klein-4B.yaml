@@ -1,0 +1,23 @@
+name: FLUX.2-klein-4B
+type: flux2-klein
+source: "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B" # Just for displaying. No automatic download.
+ckpt_dir: null # Please override this in commond line with `models.ckpt_dir:<path>`.
+transformer_checkpoint: "transformer"
+tokenizer_path: null # By default the same as ckpt_dir, or you can override it with `models.tokenizer_path:<path>`.
+tokenizer_type: "hf" # one of: hf, tiktoken
+
+task: t2i
+
+encoder:
+  name: "qwen3"
+  ckpt_dir: "/home/dataset/Qwen3-4B" # Please override this in commond line with `encoder.ckpt_dir:<path>`.
+
+vae:
+  checkpoint: "vae/diffusion_pytorch_model.safetensors"
+
+sampler:
+  sample_shift: 1.0
+  sample_steps: 4
+  boundary: []
+  guidance_scale: [4.0]
+  num_train_timesteps: 1000

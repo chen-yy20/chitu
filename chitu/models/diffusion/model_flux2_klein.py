@@ -1,4 +1,5 @@
 import math
+from logging import getLogger
 from dataclasses import dataclass, field
 
 import torch
@@ -6,6 +7,11 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from chitu.models.registry import ModelType, register_model, log_init_params
+
+logger = getLogger(__name__)
+
+__all__ = ['Flux2']
 
 @dataclass
 class Flux2Params:
@@ -48,7 +54,8 @@ class Klein4BParams:
     mlp_ratio: float = 3.0
     use_guidance_embed: bool = False
 
-
+@register_model(ModelType.FLUX2_KLEIN)
+@log_init_params
 class Flux2(nn.Module):
     def __init__(self, params: Flux2Params):
         super().__init__()

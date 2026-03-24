@@ -1,9 +1,14 @@
+import logging
+import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from einops import rearrange
 from torch import Tensor, nn
+
+from safetensors.torch import load_file
 
 
 @dataclass
@@ -334,3 +339,75 @@ class AutoEncoder(nn.Module):
         )
         dec = self.decoder(z)
         return dec
+
+
+class FLUX2VAE:
+    def __init__(self, 
+                vae_path=None,
+                dtype=torch.float,
+                device="cuda"):
+        self.dtype = dtype
+        self.device = device
+
+        from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+
+        config_path = Path(vae_path).with_name("config.json")
+        with config_path.open("r", encoding="utf-8") as f:
+            config = json.load(f)
+        config = {k: v for k, v in config.items() if not k.startswith("_")}
+
+        with torch.device('meta'):
+            self.model = AutoencoderKLFlux2(**config)
+
+        self.ps = tuple(self.model.config.patch_size)
+        self.bn_eps = self.model.config.batch_norm_eps
+        
+        logging.info(f'loading {vae_path}')
+        if str(vae_path).endswith(".safetensors"):
+            self.model.load_state_dict(
+                load_file(vae_path, device=str(device)),
+                assign=True
+            )
+        else:
+            self.model.load_state_dict(
+                torch.load(vae_path, map_location=device, mmap=True), 
+                assign=True
+            )
+
+        self.model.eval().requires_grad_(False).to(device)
+
+    def normalize(self, z):
+        self.model.bn.eval()
+        return self.model.bn(z)
+
+    def inv_normalize(self, z):
+        self.model.bn.eval()
+        s = torch.sqrt(self.model.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
+        m = self.model.bn.running_mean.view(1, -1, 1, 1)
+        return z * s + m
+
+    def encode(self, x):
+        moments = self.model.encoder(x)
+        if self.model.quant_conv is not None:
+            moments = self.model.quant_conv(moments)
+
+        mean = torch.chunk(moments, 2, dim=1)[0]
+        z = rearrange(
+            mean,
+            "... c (i pi) (j pj)  -> ... (c pi pj) i j",
+            pi=self.ps[0],
+            pj=self.ps[1],
+        )
+        return self.normalize(z)
+
+    def decode(self, z):
+        z = self.inv_normalize(z)
+        z = rearrange(
+            z,
+            "... (c pi pj) i j -> ... c (i pi) (j pj)",
+            pi=self.ps[0],
+            pj=self.ps[1],
+        )
+        if self.model.post_quant_conv is not None:
+            z = self.model.post_quant_conv(z)
+        return self.model.decoder(z)
